@@ -40,3 +40,7 @@ export const listCasesSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(10),
 });
+
+export const rejectCaseSchema = z.object({
+  reason: z.string().trim().min(10).max(2000),
+}).strict();

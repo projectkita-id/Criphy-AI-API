@@ -4,10 +4,12 @@ import { prisma } from "../lib/prisma";
 import { requireAuth } from "../middlewares/auth.middleware";
 import { requireRole } from "../middlewares/role.middleware";
 import { Prisma } from "../generated/prisma/client";
+import { randomUUID } from "node:crypto";
 import {
   createCaseSchema,
-  updateCaseSchema,
   listCasesSchema,
+  updateCaseSchema,
+  rejectCaseSchema,
 } from "../validators/case.validator";
 
 const router = Router();
@@ -122,23 +124,31 @@ router.post(
           context,
           topic,
           stimulus,
-            scientificData:
+
+          scientificData:
             scientificData === null
-                ? Prisma.JsonNull
-                : scientificData === undefined
+              ? Prisma.JsonNull
+              : scientificData === undefined
                 ? undefined
                 : (scientificData as Prisma.InputJsonObject),
+
           targetConcept,
+
           possibleMisconceptions:
             possibleMisconceptions ?? undefined,
+
           expertAnswer,
 
-          // Server-controlled values
+          // Server-controlled versioning
+          caseGroupId: randomUUID(),
           version: 1,
+
+          // Server-controlled validation
           validationStatus: "DRAFT",
         },
         select: {
           id: true,
+          caseGroupId: true,
           title: true,
           context: true,
           topic: true,
@@ -346,10 +356,12 @@ router.delete(
     }
 
     try {
-      const result = await prisma.validatedCase.deleteMany({
-        where: {
-          id,
-          validationStatus: "DRAFT",
+        const result = await prisma.validatedCase.deleteMany({
+            where: {
+            id,
+            validationStatus: {
+                in: ["DRAFT", "REJECTED"],
+            },
         },
       });
 
@@ -372,7 +384,7 @@ router.delete(
 
         res.status(409).json({
           success: false,
-          message: "Only draft case studies can be deleted",
+          message: "Only draft or rejected case studies can be deleted",
         });
         return;
       }
@@ -387,6 +399,467 @@ router.delete(
       res.status(500).json({
         success: false,
         message: "Failed to delete case study",
+      });
+    }
+  }
+);
+
+
+router.patch(
+  "/:id/submit",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const { id } = req.params;
+
+    if (
+      typeof id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid case study ID",
+      });
+      return;
+    }
+
+    try {
+      const result = await prisma.validatedCase.updateMany({
+        where: {
+          id,
+          validationStatus: "DRAFT",
+        },
+        data: {
+          validationStatus: "IN_REVIEW",
+          rejectionReason: null,
+        },
+      });
+
+      if (result.count === 0) {
+        const existingCase = await prisma.validatedCase.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            validationStatus: true,
+          },
+        });
+
+        if (!existingCase) {
+          res.status(404).json({
+            success: false,
+            message: "Case study not found",
+          });
+          return;
+        }
+
+        res.status(409).json({
+          success: false,
+          message: "Only draft case studies can be submitted for review",
+        });
+        return;
+      }
+
+      const submittedCase = await prisma.validatedCase.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          title: true,
+          validationStatus: true,
+          updatedAt: true,
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Case study submitted for review successfully",
+        data: submittedCase,
+      });
+    } catch (error) {
+      console.error("Failed to submit case study:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to submit case study for review",
+      });
+    }
+  }
+);
+
+router.patch(
+  "/:id/approve",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const { id } = req.params;
+
+    if (
+      typeof id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid case study ID",
+      });
+      return;
+    }
+
+    const admin = res.locals.user as {
+      id: string;
+      role: "ADMIN";
+    };
+
+    try {
+      const result = await prisma.validatedCase.updateMany({
+        where: {
+          id,
+          validationStatus: "IN_REVIEW",
+        },
+        data: {
+          validationStatus: "VALIDATED",
+          validatorId: admin.id,
+          validatedAt: new Date(),
+        },
+      });
+
+      if (result.count === 0) {
+        const existingCase = await prisma.validatedCase.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            validationStatus: true,
+          },
+        });
+
+        if (!existingCase) {
+          res.status(404).json({
+            success: false,
+            message: "Case study not found",
+          });
+          return;
+        }
+
+        res.status(409).json({
+          success: false,
+          message: "Only case studies under review can be approved",
+        });
+        return;
+      }
+
+      const approvedCase = await prisma.validatedCase.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          title: true,
+          validationStatus: true,
+          validatorId: true,
+          validatedAt: true,
+          updatedAt: true,
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Case study approved successfully",
+        data: approvedCase,
+      });
+    } catch (error) {
+      console.error("Failed to approve case study:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to approve case study",
+      });
+    }
+  }
+);
+
+router.patch(
+  "/:id/reject",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const { id } = req.params;
+
+    if (
+      typeof id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid case study ID",
+      });
+      return;
+    }
+
+    const parsed = rejectCaseSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid rejection data",
+        errors: parsed.error.flatten(),
+      });
+      return;
+    }
+
+    const { reason } = parsed.data;
+
+    try {
+      const result = await prisma.validatedCase.updateMany({
+        where: {
+          id,
+          validationStatus: "IN_REVIEW",
+        },
+        data: {
+          validationStatus: "REJECTED",
+          rejectionReason: reason,
+          validatorId: null,
+          validatedAt: null,
+        },
+      });
+
+      if (result.count === 0) {
+        const existingCase = await prisma.validatedCase.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            validationStatus: true,
+          },
+        });
+
+        if (!existingCase) {
+          res.status(404).json({
+            success: false,
+            message: "Case study not found",
+          });
+          return;
+        }
+
+        res.status(409).json({
+          success: false,
+          message: "Only case studies under review can be rejected",
+        });
+        return;
+      }
+
+      const rejectedCase = await prisma.validatedCase.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          title: true,
+          validationStatus: true,
+          rejectionReason: true,
+          updatedAt: true,
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Case study rejected successfully",
+        data: rejectedCase,
+      });
+    } catch (error) {
+      console.error("Failed to reject case study:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to reject case study",
+      });
+    }
+  }
+);
+
+router.patch(
+  "/:id/revise",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const { id } = req.params;
+
+    if (
+      typeof id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid case study ID",
+      });
+      return;
+    }
+
+    try {
+      const result = await prisma.validatedCase.updateMany({
+        where: {
+          id,
+          validationStatus: "REJECTED",
+        },
+        data: {
+          validationStatus: "DRAFT",
+          validatorId: null,
+          validatedAt: null,
+        },
+      });
+
+      if (result.count === 0) {
+        const existingCase = await prisma.validatedCase.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            validationStatus: true,
+          },
+        });
+
+        if (!existingCase) {
+          res.status(404).json({
+            success: false,
+            message: "Case study not found",
+          });
+          return;
+        }
+
+        res.status(409).json({
+          success: false,
+          message: "Only rejected case studies can be reopened for revision",
+        });
+        return;
+      }
+
+      const revisedCase = await prisma.validatedCase.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          title: true,
+          validationStatus: true,
+          rejectionReason: true,
+          updatedAt: true,
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Case study reopened for revision successfully",
+        data: revisedCase,
+      });
+    } catch (error) {
+      console.error("Failed to reopen case study:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to reopen case study for revision",
+      });
+    }
+  }
+);
+
+router.post(
+  "/:id/revisions",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const { id } = req.params;
+
+    if (
+      typeof id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid case study ID",
+      });
+      return;
+    }
+
+    try {
+      const originalCase = await prisma.validatedCase.findUnique({
+        where: { id },
+      });
+
+      if (!originalCase) {
+        res.status(404).json({
+          success: false,
+          message: "Case study not found",
+        });
+        return;
+      }
+
+      if (originalCase.validationStatus !== "VALIDATED") {
+        res.status(409).json({
+          success: false,
+          message: "Only validated case studies can be revised",
+        });
+        return;
+      }
+
+      const latestVersion = await prisma.validatedCase.findFirst({
+        where: {
+          caseGroupId: originalCase.caseGroupId,
+        },
+        orderBy: {
+          version: "desc",
+        },
+        select: {
+          version: true,
+        },
+      });
+
+      if (!latestVersion || latestVersion.version !== originalCase.version) {
+        res.status(409).json({
+          success: false,
+          message: "Only the latest version can be revised",
+        });
+        return;
+      }
+
+      const revisedCase = await prisma.validatedCase.create({
+        data: {
+          caseGroupId: originalCase.caseGroupId,
+          version: originalCase.version + 1,
+
+          title: originalCase.title,
+          context: originalCase.context,
+          topic: originalCase.topic,
+          stimulus: originalCase.stimulus,
+
+          scientificData:
+            originalCase.scientificData === null
+              ? Prisma.JsonNull
+              : (originalCase.scientificData as Prisma.InputJsonValue),
+
+          targetConcept: originalCase.targetConcept,
+
+          possibleMisconceptions:
+            originalCase.possibleMisconceptions === null
+              ? Prisma.JsonNull
+              : (originalCase.possibleMisconceptions as Prisma.InputJsonValue),
+
+          expertAnswer: originalCase.expertAnswer,
+
+          validationStatus: "DRAFT",
+          validatorId: null,
+          validatedAt: null,
+          rejectionReason: null,
+        },
+        select: {
+          id: true,
+          caseGroupId: true,
+          title: true,
+          version: true,
+          validationStatus: true,
+          createdAt: true,
+        },
+      });
+
+      res.status(201).json({
+        success: true,
+        message: "New case study revision created successfully",
+        data: revisedCase,
+      });
+    } catch (error) {
+      console.error("Failed to create case revision:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to create case study revision",
       });
     }
   }

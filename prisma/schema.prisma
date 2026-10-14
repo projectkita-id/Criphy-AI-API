@@ -48,16 +48,23 @@ model ValidatedCase {
   possibleMisconceptions Json?
   expertAnswer           String          @db.Text
 
-  version          Int                  @default(1)
+  // Case versioning
+  caseGroupId String @db.Uuid
+  version     Int     @default(1)
+
+  // Validation workflow
   validationStatus CaseValidationStatus @default(DRAFT)
 
-  validatorId String?   @db.Uuid
-  validator   User?     @relation("CaseValidator", fields: [validatorId], references: [id], onDelete: SetNull)
-  validatedAt DateTime?
+  validatorId     String?   @db.Uuid
+  validator       User?     @relation("CaseValidator", fields: [validatorId], references: [id], onDelete: SetNull)
+  validatedAt     DateTime?
+  rejectionReason String?   @db.Text
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([caseGroupId, version])
+  @@index([caseGroupId])
   @@index([context])
   @@index([validationStatus])
   @@index([validatorId])
