@@ -2,16 +2,13 @@
 import express from "express";
 import cors from "cors";
 
+import healthRoutes from "./routes/health.routes";
+
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-app.get("/api/health", (_req, res) => {
-  res.status(200).json({
-    success: true,
-    message: "CRI-PHY AI API is running",
-  });
-});
+app.use("/api/health", healthRoutes);
 
 export default app;
