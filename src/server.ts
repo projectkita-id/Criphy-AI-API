@@ -1,10 +1,8 @@
-
-import "dotenv/config";
-
+import { env } from "./config/env";
 import app from "./app";
 
-const PORT = Number(process.env.PORT);
-
-app.listen(PORT, () => {
-  console.log(`CRI-PHY AI API running on http://localhost:${PORT}`);
+app.listen(env.PORT, () => {
+  console.log(
+    `CRI-PHY AI API running on http://localhost:${env.PORT}`
+  );
 });
