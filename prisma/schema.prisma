@@ -12,6 +12,19 @@ enum Role {
   STUDENT
 }
 
+enum LearningContext {
+  DAILY_LIFE
+  ENVIRONMENT
+  TECHNOLOGY
+}
+
+enum CaseValidationStatus {
+  DRAFT
+  IN_REVIEW
+  VALIDATED
+  REJECTED
+}
+
 model User {
   id           String   @id @default(uuid()) @db.Uuid
   name         String
@@ -20,4 +33,32 @@ model User {
   role         Role     @default(STUDENT)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  validatedCases ValidatedCase[] @relation("CaseValidator")
+}
+
+model ValidatedCase {
+  id                     String          @id @default(uuid()) @db.Uuid
+  title                  String
+  context                LearningContext
+  topic                  String
+  stimulus               String          @db.Text
+  scientificData         Json?
+  targetConcept          String          @db.Text
+  possibleMisconceptions Json?
+  expertAnswer           String          @db.Text
+
+  version          Int                  @default(1)
+  validationStatus CaseValidationStatus @default(DRAFT)
+
+  validatorId String?   @db.Uuid
+  validator   User?     @relation("CaseValidator", fields: [validatorId], references: [id], onDelete: SetNull)
+  validatedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([context])
+  @@index([validationStatus])
+  @@index([validatorId])
 }

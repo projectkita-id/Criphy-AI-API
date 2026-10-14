@@ -7,6 +7,7 @@ import healthRoutes from "./routes/health.routes";
 import authRoutes from "./routes/auth.routes";
 import adminRoutes from "./routes/admin.routes";
 import { requireTrustedOrigin } from "./middlewares/origin.middleware";
+import caseRoutes from "./routes/case.routes";
 
 const app = express();
 
@@ -25,5 +26,6 @@ app.use("/api", requireTrustedOrigin);
 app.use("/api/health", healthRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/cases", caseRoutes);
 
 export default app;

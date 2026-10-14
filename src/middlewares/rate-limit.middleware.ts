@@ -1,25 +1,39 @@
+
 import { rateLimit } from "express-rate-limit";
+import { env } from "../config/env";
+
+const isDevelopment = env.NODE_ENV === "development";
 
 export const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
+  windowMs: isDevelopment
+    ? 2 * 60 * 1000
+    : 15 * 60 * 1000,
+
   limit: 10,
+
   standardHeaders: "draft-8",
   legacyHeaders: false,
+
   message: {
     success: false,
-    message:
-      "Too many login attempts. Please try again in 15 minutes.",
+    message: isDevelopment
+      ? "Terlalu banyak percobaan masuk. Coba lagi dalam 2 menit."
+      : "Terlalu banyak percobaan masuk. Silakan coba lagi nanti.",
   },
 });
 
 export const registerLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  limit: 5,
+  windowMs: isDevelopment
+    ? 5 * 60 * 1000
+    : 60 * 60 * 1000,
+
+  limit: isDevelopment ? 10 : 5,
+
   standardHeaders: "draft-8",
   legacyHeaders: false,
+
   message: {
     success: false,
-    message:
-      "Too many registration attempts. Please try again later.",
+    message: "Terlalu banyak percobaan pendaftaran. Silakan coba lagi nanti.",
   },
 });
