@@ -12,9 +12,14 @@ import {
   clearAuthCookieOptions,
 } from "../config/cookie";
 
+import {
+  loginLimiter,
+  registerLimiter,
+} from "../middlewares/rate-limit.middleware";
+
 const router = Router();
 
-router.post("/register", async (req, res) => {
+router.post("/register", registerLimiter, async (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -74,7 +79,7 @@ router.post("/register", async (req, res) => {
 });
 
 
-router.post("/login", async (req, res) => {
+router.post("/login", loginLimiter, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
 
   if (!parsed.success) {

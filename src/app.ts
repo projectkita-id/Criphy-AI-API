@@ -6,6 +6,7 @@ import { env } from "./config/env";
 import healthRoutes from "./routes/health.routes";
 import authRoutes from "./routes/auth.routes";
 import adminRoutes from "./routes/admin.routes";
+import { requireTrustedOrigin } from "./middlewares/origin.middleware";
 
 const app = express();
 
@@ -18,6 +19,8 @@ app.use(
 
 app.use(express.json({ limit: "100kb" }));
 app.use(cookieParser());
+
+app.use("/api", requireTrustedOrigin);
 
 app.use("/api/health", healthRoutes);
 app.use("/api/auth", authRoutes);
