@@ -1,3 +1,146 @@
+
+# ==========================================
+# CRI-PHY AI — Backend
+# Node.js + Express + TypeScript + Prisma
+# ==========================================
+
+
+# ------------------------------------------
+# 1. Dependencies
+# ------------------------------------------
+
 node_modules/
-dist/
+.pnpm-store/
+
+
+# ------------------------------------------
+# 2. Environment variables and secrets
+# ------------------------------------------
+
 .env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+secrets/
+credentials/
+
+
+# ------------------------------------------
+# 3. TypeScript build output
+# ------------------------------------------
+
+dist/
+build/
+out/
+
+*.tsbuildinfo
+
+
+# ------------------------------------------
+# 4. Prisma generated files
+# ------------------------------------------
+
+src/generated/prisma/
+generated/
+
+# IMPORTANT:
+# Do NOT ignore prisma/schema.prisma
+# Do NOT ignore prisma/migrations/
+# Do NOT ignore prisma.config.ts
+# Do NOT ignore prisma7.config.ts
+
+
+# ------------------------------------------
+# 5. Logs
+# ------------------------------------------
+
+logs/
+*.log
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+
+# ------------------------------------------
+# 6. Test coverage and temporary files
+# ------------------------------------------
+
+coverage/
+.nyc_output/
+
+tmp/
+temp/
+.cache/
+
+
+# ------------------------------------------
+# 7. Editor settings
+# ------------------------------------------
+
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+.idea/
+*.swp
+*.swo
+*~
+
+
+# ------------------------------------------
+# 8. Operating system files
+# ------------------------------------------
+
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+
+# ------------------------------------------
+# 9. Local database and backup files
+# ------------------------------------------
+
+*.sqlite
+*.sqlite3
+*.db
+
+*.sql.gz
+*.dump
+*.backup
+
+
+# ------------------------------------------
+# 10. Local uploads and runtime files
+# ------------------------------------------
+
+uploads/
+storage/
+runtime/
+
+
+# ------------------------------------------
+# 11. Package manager cache
+# ------------------------------------------
+
+.npm/
+.yarn/cache/
+.yarn/unplugged/
+
+
+# ------------------------------------------
+# 12. Deployment and process files
+# ------------------------------------------
+
+*.pid
+*.pid.lock
+
+.vercel/
+.netlify/
