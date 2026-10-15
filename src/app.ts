@@ -8,6 +8,7 @@ import authRoutes from "./routes/auth.routes";
 import adminRoutes from "./routes/admin.routes";
 import { requireTrustedOrigin } from "./middlewares/origin.middleware";
 import caseRoutes from "./routes/case.routes";
+import studentCaseRoutes from "./routes/student-case.routes";
 
 const app = express();
 
@@ -27,5 +28,6 @@ app.use("/api/health", healthRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/cases", caseRoutes);
+app.use("/api/student", studentCaseRoutes);
 
 export default app;

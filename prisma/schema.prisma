@@ -25,6 +25,12 @@ enum CaseValidationStatus {
   REJECTED
 }
 
+enum ModuleStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
 model User {
   id           String   @id @default(uuid()) @db.Uuid
   name         String
@@ -50,7 +56,7 @@ model ValidatedCase {
 
   // Case versioning
   caseGroupId String @db.Uuid
-  version     Int     @default(1)
+  version     Int    @default(1)
 
   // Validation workflow
   validationStatus CaseValidationStatus @default(DRAFT)
@@ -60,6 +66,9 @@ model ValidatedCase {
   validatedAt     DateTime?
   rejectionReason String?   @db.Text
 
+  // Learning modules referencing this case version
+  learningModules LearningModule[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -68,4 +77,22 @@ model ValidatedCase {
   @@index([context])
   @@index([validationStatus])
   @@index([validatorId])
+}
+
+model LearningModule {
+  id          String       @id @default(uuid()) @db.Uuid
+  title       String
+  description String?      @db.Text
+  topic       String
+  status      ModuleStatus @default(DRAFT)
+
+  // References a specific case version
+  caseId String        @db.Uuid
+  case   ValidatedCase @relation(fields: [caseId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([caseId])
+  @@index([status])
 }
