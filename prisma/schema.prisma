@@ -7,6 +7,10 @@ datasource db {
   provider = "postgresql"
 }
 
+// ==========================================
+// ENUMS
+// ==========================================
+
 enum Role {
   ADMIN
   STUDENT
@@ -31,6 +35,32 @@ enum ModuleStatus {
   ARCHIVED
 }
 
+enum AssessmentType {
+  PRE_TEST
+  POST_TEST
+}
+
+enum AssessmentStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum QuestionType {
+  MCQ
+  ESSAY
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  PENDING_GRADING
+  GRADED
+}
+
+// ==========================================
+// USER
+// ==========================================
+
 model User {
   id           String   @id @default(uuid()) @db.Uuid
   name         String
@@ -40,8 +70,16 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  // Case validation
   validatedCases ValidatedCase[] @relation("CaseValidator")
+
+  // Student assessment attempts
+  assessmentAttempts AssessmentAttempt[]
 }
+
+// ==========================================
+// VALIDATED CASE
+// ==========================================
 
 model ValidatedCase {
   id                     String          @id @default(uuid()) @db.Uuid
@@ -79,6 +117,10 @@ model ValidatedCase {
   @@index([validatorId])
 }
 
+// ==========================================
+// LEARNING MODULE
+// ==========================================
+
 model LearningModule {
   id          String       @id @default(uuid()) @db.Uuid
   title       String
@@ -96,9 +138,142 @@ model LearningModule {
   caseId String        @db.Uuid
   case   ValidatedCase @relation(fields: [caseId], references: [id], onDelete: Restrict)
 
+  // Pre-test and post-test
+  assessments Assessment[]
+
+  // Shared questions used by both tests
+  assessmentQuestions AssessmentQuestion[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([caseId])
   @@index([status])
+}
+
+// ==========================================
+// ASSESSMENT
+// ==========================================
+
+model Assessment {
+  id     String           @id @default(uuid()) @db.Uuid
+  title  String
+  type   AssessmentType
+  status AssessmentStatus @default(DRAFT)
+
+  // Parent learning module
+  moduleId String         @db.Uuid
+  module   LearningModule @relation(fields: [moduleId], references: [id], onDelete: Restrict)
+
+  // Student attempts
+  attempts AssessmentAttempt[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([moduleId, type])
+  @@index([moduleId])
+  @@index([status])
+  @@index([type])
+}
+
+// ==========================================
+// SHARED ASSESSMENT QUESTION
+// ==========================================
+
+model AssessmentQuestion {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Shared question belongs to a learning module
+  moduleId String         @db.Uuid
+  module   LearningModule @relation(fields: [moduleId], references: [id], onDelete: Restrict)
+
+  type         QuestionType
+  questionText String       @db.Text
+  order        Int
+
+  // MCQ question fields
+  // Example:
+  // [
+  //   { "key": "A", "text": "Option A" },
+  //   { "key": "B", "text": "Option B" }
+  // ]
+  options       Json?
+  correctAnswer String?
+
+  // Essay grading fields
+  rubric   String? @db.Text
+  maxScore Float   @default(1)
+
+  // Critical-thinking indicator
+  // Example: INTERPRETATION, ANALYSIS, EVALUATION
+  indicator String?
+
+  // Student answers from both pre-test and post-test
+  answers AssessmentAnswer[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([moduleId, order])
+  @@index([moduleId])
+}
+
+// ==========================================
+// ASSESSMENT ATTEMPT
+// ==========================================
+
+model AssessmentAttempt {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Pre-test or post-test
+  assessmentId String     @db.Uuid
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Restrict)
+
+  // Student taking the assessment
+  studentId String @db.Uuid
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Restrict)
+
+  // Grading workflow
+  status AttemptStatus @default(IN_PROGRESS)
+
+  startedAt   DateTime  @default(now())
+  submittedAt DateTime?
+  gradedAt    DateTime?
+
+  // Student answers
+  answers AssessmentAnswer[]
+
+  @@index([assessmentId])
+  @@index([studentId])
+  @@index([status])
+}
+
+// ==========================================
+// ASSESSMENT ANSWER
+// ==========================================
+
+model AssessmentAnswer {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Parent assessment attempt
+  attemptId String            @db.Uuid
+  attempt   AssessmentAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict)
+
+  // Shared question
+  questionId String             @db.Uuid
+  question   AssessmentQuestion @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  // Student's answer
+  answer String @db.Text
+
+  // MCQ: automatically graded
+  // ESSAY: manually graded
+  score    Float?
+  feedback String?   @db.Text
+  gradedAt DateTime?
+
+  // One answer per question per attempt
+  @@unique([attemptId, questionId])
+  @@index([questionId])
 }

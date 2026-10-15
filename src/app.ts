@@ -11,6 +11,8 @@ import caseRoutes from "./routes/case.routes";
 import studentCaseRoutes from "./routes/student-case.routes";
 import moduleRoutes from "./routes/module.routes";
 import studentModuleRoutes from "./routes/student-module.routes";
+import assessmentRoutes from "./routes/assessment.routes";
+import assessmentQuestionRoutes from "./routes/assessment-question.routes";
 
 const app = express();
 
@@ -33,5 +35,7 @@ app.use("/api/cases", caseRoutes);
 app.use("/api/student", studentCaseRoutes);
 app.use("/api/modules", moduleRoutes);
 app.use("/api/student/modules", studentModuleRoutes);
+app.use("/api/assessments", assessmentRoutes);
+app.use("/api/modules", assessmentQuestionRoutes);
 
 export default app;
