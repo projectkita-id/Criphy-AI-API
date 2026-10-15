@@ -44,3 +44,5 @@ export const listCasesSchema = z.object({
 export const rejectCaseSchema = z.object({
   reason: z.string().trim().min(10).max(2000),
 }).strict();
+
+export const caseIdSchema = z.uuid();

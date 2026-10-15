@@ -1,18 +1,23 @@
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 
 import { prisma } from "../lib/prisma";
 import { requireAuth } from "../middlewares/auth.middleware";
 import { requireRole } from "../middlewares/role.middleware";
 import { Prisma } from "../generated/prisma/client";
-import { randomUUID } from "node:crypto";
+
 import {
   createCaseSchema,
   listCasesSchema,
   updateCaseSchema,
   rejectCaseSchema,
+  caseIdSchema,
 } from "../validators/case.validator";
 
 const router = Router();
+
+// GET /api/cases
+// List all case studies (ADMIN only)
 router.get(
   "/",
   requireAuth,
@@ -90,6 +95,8 @@ router.get(
   }
 );
 
+// POST /api/cases
+// Create a draft case study (ADMIN only)
 router.post(
   "/",
   requireAuth,
@@ -174,23 +181,24 @@ router.post(
   }
 );
 
+// GET /api/cases/:id
+// Retrieve a single case study (ADMIN only)
 router.get(
   "/:id",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res) => {
-    const { id } = req.params;
+    const parsedId = caseIdSchema.safeParse(req.params.id);
 
-    if (
-      typeof id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
-    ) {
+    if (!parsedId.success) {
       res.status(400).json({
         success: false,
         message: "Invalid case study ID",
       });
       return;
     }
+
+    const id = parsedId.data;
 
     try {
       const caseStudy = await prisma.validatedCase.findUnique({
@@ -229,17 +237,16 @@ router.get(
   }
 );
 
+// PATCH /api/cases/:id
+// Update a draft case study (ADMIN only)
 router.patch(
   "/:id",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res) => {
-    const { id } = req.params;
+    const parsedId = caseIdSchema.safeParse(req.params.id);
 
-    if (
-      typeof id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
-    ) {
+    if (!parsedId.success) {
       res.status(400).json({
         success: false,
         message: "Invalid case study ID",
@@ -247,6 +254,7 @@ router.patch(
       return;
     }
 
+    const id = parsedId.data;
     const parsed = updateCaseSchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -272,12 +280,14 @@ router.patch(
         },
         data: {
           ...otherFields,
+
           ...(scientificData !== undefined && {
             scientificData:
               scientificData === null
                 ? Prisma.JsonNull
                 : (scientificData as Prisma.InputJsonObject),
           }),
+
           ...(possibleMisconceptions !== undefined && {
             possibleMisconceptions:
               possibleMisconceptions === null
@@ -290,7 +300,10 @@ router.patch(
       if (result.count === 0) {
         const existingCase = await prisma.validatedCase.findUnique({
           where: { id },
-          select: { id: true, validationStatus: true },
+          select: {
+            id: true,
+            validationStatus: true,
+          },
         });
 
         if (!existingCase) {
@@ -337,23 +350,24 @@ router.patch(
   }
 );
 
+// DELETE /api/cases/:id
+// Delete the latest draft or rejected case version
 router.delete(
   "/:id",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res) => {
-    const { id } = req.params;
+    const parsedId = caseIdSchema.safeParse(req.params.id);
 
-    if (
-      typeof id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
-    ) {
+    if (!parsedId.success) {
       res.status(400).json({
         success: false,
         message: "Invalid case study ID",
       });
       return;
     }
+
+    const id = parsedId.data;
 
     try {
       const caseStudy = await prisma.validatedCase.findUnique({
@@ -442,23 +456,24 @@ router.delete(
   }
 );
 
+// PATCH /api/cases/:id/submit
+// Submit a draft for expert review
 router.patch(
   "/:id/submit",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res) => {
-    const { id } = req.params;
+    const parsedId = caseIdSchema.safeParse(req.params.id);
 
-    if (
-      typeof id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
-    ) {
+    if (!parsedId.success) {
       res.status(400).json({
         success: false,
         message: "Invalid case study ID",
       });
       return;
     }
+
+    const id = parsedId.data;
 
     try {
       const result = await prisma.validatedCase.updateMany({
@@ -522,23 +537,24 @@ router.patch(
   }
 );
 
+// PATCH /api/cases/:id/approve
+// Approve a case under review
 router.patch(
   "/:id/approve",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res) => {
-    const { id } = req.params;
+    const parsedId = caseIdSchema.safeParse(req.params.id);
 
-    if (
-      typeof id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
-    ) {
+    if (!parsedId.success) {
       res.status(400).json({
         success: false,
         message: "Invalid case study ID",
       });
       return;
     }
+
+    const id = parsedId.data;
 
     const admin = res.locals.user as {
       id: string;
@@ -610,17 +626,16 @@ router.patch(
   }
 );
 
+// PATCH /api/cases/:id/reject
+// Reject a case under review
 router.patch(
   "/:id/reject",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res) => {
-    const { id } = req.params;
+    const parsedId = caseIdSchema.safeParse(req.params.id);
 
-    if (
-      typeof id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
-    ) {
+    if (!parsedId.success) {
       res.status(400).json({
         success: false,
         message: "Invalid case study ID",
@@ -628,6 +643,7 @@ router.patch(
       return;
     }
 
+    const id = parsedId.data;
     const parsed = rejectCaseSchema.safeParse(req.body);
 
     if (!parsed.success) {
@@ -706,23 +722,24 @@ router.patch(
   }
 );
 
+// PATCH /api/cases/:id/revise
+// Reopen a rejected case as a draft
 router.patch(
   "/:id/revise",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res) => {
-    const { id } = req.params;
+    const parsedId = caseIdSchema.safeParse(req.params.id);
 
-    if (
-      typeof id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
-    ) {
+    if (!parsedId.success) {
       res.status(400).json({
         success: false,
         message: "Invalid case study ID",
       });
       return;
     }
+
+    const id = parsedId.data;
 
     try {
       const result = await prisma.validatedCase.updateMany({
@@ -788,23 +805,24 @@ router.patch(
   }
 );
 
+// POST /api/cases/:id/revisions
+// Create a new draft version from the latest validated case
 router.post(
   "/:id/revisions",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res) => {
-    const { id } = req.params;
+    const parsedId = caseIdSchema.safeParse(req.params.id);
 
-    if (
-      typeof id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
-    ) {
+    if (!parsedId.success) {
       res.status(400).json({
         success: false,
         message: "Invalid case study ID",
       });
       return;
     }
+
+    const id = parsedId.data;
 
     try {
       const originalCase = await prisma.validatedCase.findUnique({
@@ -895,7 +913,6 @@ router.post(
         data: revisedCase,
       });
     } catch (error) {
-      // Handle concurrent revision creation conflicts
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === "P2002"
@@ -918,23 +935,24 @@ router.post(
   }
 );
 
+// GET /api/cases/:id/versions
+// Retrieve case study version history
 router.get(
   "/:id/versions",
   requireAuth,
   requireRole("ADMIN"),
   async (req, res) => {
-    const { id } = req.params;
+    const parsedId = caseIdSchema.safeParse(req.params.id);
 
-    if (
-      typeof id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
-    ) {
+    if (!parsedId.success) {
       res.status(400).json({
         success: false,
         message: "Invalid case study ID",
       });
       return;
     }
+
+    const id = parsedId.data;
 
     try {
       const caseStudy = await prisma.validatedCase.findUnique({
