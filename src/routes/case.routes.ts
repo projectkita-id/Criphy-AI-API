@@ -356,32 +356,28 @@ router.delete(
     }
 
     try {
-        const result = await prisma.validatedCase.deleteMany({
-            where: {
-            id,
-            validationStatus: {
-                in: ["DRAFT", "REJECTED"],
-            },
+      const caseStudy = await prisma.validatedCase.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          caseGroupId: true,
+          version: true,
+          validationStatus: true,
         },
       });
 
-      if (result.count === 0) {
-        const existingCase = await prisma.validatedCase.findUnique({
-          where: { id },
-          select: {
-            id: true,
-            validationStatus: true,
-          },
+      if (!caseStudy) {
+        res.status(404).json({
+          success: false,
+          message: "Case study not found",
         });
+        return;
+      }
 
-        if (!existingCase) {
-          res.status(404).json({
-            success: false,
-            message: "Case study not found",
-          });
-          return;
-        }
-
+      if (
+        caseStudy.validationStatus !== "DRAFT" &&
+        caseStudy.validationStatus !== "REJECTED"
+      ) {
         res.status(409).json({
           success: false,
           message: "Only draft or rejected case studies can be deleted",
@@ -389,9 +385,51 @@ router.delete(
         return;
       }
 
+      const newerVersion = await prisma.validatedCase.findFirst({
+        where: {
+          caseGroupId: caseStudy.caseGroupId,
+          version: {
+            gt: caseStudy.version,
+          },
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (newerVersion) {
+        res.status(409).json({
+          success: false,
+          message: "Only the latest case study version can be deleted",
+        });
+        return;
+      }
+
+      const result = await prisma.validatedCase.deleteMany({
+        where: {
+          id,
+          validationStatus: {
+            in: ["DRAFT", "REJECTED"],
+          },
+        },
+      });
+
+      if (result.count === 0) {
+        res.status(409).json({
+          success: false,
+          message: "Case study can no longer be deleted",
+        });
+        return;
+      }
+
       res.status(200).json({
         success: true,
-        message: "Draft case study deleted successfully",
+        message: "Case study deleted successfully",
+        data: {
+          id: caseStudy.id,
+          caseGroupId: caseStudy.caseGroupId,
+          version: caseStudy.version,
+        },
       });
     } catch (error) {
       console.error("Failed to delete case study:", error);
@@ -403,7 +441,6 @@ router.delete(
     }
   }
 );
-
 
 router.patch(
   "/:id/submit",
@@ -802,7 +839,10 @@ router.post(
         },
       });
 
-      if (!latestVersion || latestVersion.version !== originalCase.version) {
+      if (
+        !latestVersion ||
+        latestVersion.version !== originalCase.version
+      ) {
         res.status(409).json({
           success: false,
           message: "Only the latest version can be revised",
@@ -855,11 +895,100 @@ router.post(
         data: revisedCase,
       });
     } catch (error) {
+      // Handle concurrent revision creation conflicts
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        res.status(409).json({
+          success: false,
+          message:
+            "A revision already exists. Please refresh the case study.",
+        });
+        return;
+      }
+
       console.error("Failed to create case revision:", error);
 
       res.status(500).json({
         success: false,
         message: "Failed to create case study revision",
+      });
+    }
+  }
+);
+
+router.get(
+  "/:id/versions",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const { id } = req.params;
+
+    if (
+      typeof id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid case study ID",
+      });
+      return;
+    }
+
+    try {
+      const caseStudy = await prisma.validatedCase.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          caseGroupId: true,
+        },
+      });
+
+      if (!caseStudy) {
+        res.status(404).json({
+          success: false,
+          message: "Case study not found",
+        });
+        return;
+      }
+
+      const versions = await prisma.validatedCase.findMany({
+        where: {
+          caseGroupId: caseStudy.caseGroupId,
+        },
+        select: {
+          id: true,
+          caseGroupId: true,
+          title: true,
+          version: true,
+          validationStatus: true,
+          validatorId: true,
+          validatedAt: true,
+          rejectionReason: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+        orderBy: {
+          version: "asc",
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Case study version history retrieved successfully",
+        data: {
+          caseGroupId: caseStudy.caseGroupId,
+          totalVersions: versions.length,
+          versions,
+        },
+      });
+    } catch (error) {
+      console.error("Failed to retrieve case version history:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve case study version history",
       });
     }
   }
