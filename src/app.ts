@@ -10,6 +10,7 @@ import { requireTrustedOrigin } from "./middlewares/origin.middleware";
 import caseRoutes from "./routes/case.routes";
 import studentCaseRoutes from "./routes/student-case.routes";
 import moduleRoutes from "./routes/module.routes";
+import studentModuleRoutes from "./routes/student-module.routes";
 
 const app = express();
 
@@ -31,5 +32,6 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/cases", caseRoutes);
 app.use("/api/student", studentCaseRoutes);
 app.use("/api/modules", moduleRoutes);
+app.use("/api/student/modules", studentModuleRoutes);
 
 export default app;

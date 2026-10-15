@@ -371,4 +371,322 @@ router.patch(
   }
 );
 
+/**
+ * PATCH /api/modules/:id/publish
+ * Publish a draft learning module (ADMIN only).
+ */
+router.patch(
+  "/:id/publish",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const parsedId = moduleIdSchema.safeParse(req.params.id);
+
+    if (!parsedId.success) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid learning module ID",
+      });
+      return;
+    }
+
+    const id = parsedId.data;
+
+    try {
+      const module = await prisma.learningModule.findUnique({
+        where: { id },
+        include: {
+          case: {
+            select: {
+              id: true,
+              title: true,
+              validationStatus: true,
+            },
+          },
+        },
+      });
+
+      if (!module) {
+        res.status(404).json({
+          success: false,
+          message: "Learning module not found",
+        });
+        return;
+      }
+
+      if (module.status !== "DRAFT") {
+        res.status(409).json({
+          success: false,
+          message: "Only draft learning modules can be published",
+        });
+        return;
+      }
+
+      if (module.case.validationStatus !== "VALIDATED") {
+        res.status(409).json({
+          success: false,
+          message: "Learning module requires a validated case study",
+        });
+        return;
+      }
+
+      // Validate required module content.
+      const missingFields: string[] = [];
+
+      if (!module.gradeLevel.trim()) {
+        missingFields.push("gradeLevel");
+      }
+
+      if (!module.learningObjectives.trim()) {
+        missingFields.push("learningObjectives");
+      }
+
+      if (!module.targetConcepts.trim()) {
+        missingFields.push("targetConcepts");
+      }
+
+      if (missingFields.length > 0) {
+        res.status(409).json({
+          success: false,
+          message: "Learning module is incomplete",
+          missingFields,
+        });
+        return;
+      }
+
+      // Prevent publishing if status changed after validation.
+      const result = await prisma.learningModule.updateMany({
+        where: {
+          id,
+          status: "DRAFT",
+        },
+        data: {
+          status: "PUBLISHED",
+        },
+      });
+
+      if (result.count === 0) {
+        res.status(409).json({
+          success: false,
+          message: "Learning module can no longer be published",
+        });
+        return;
+      }
+
+      const publishedModule = await prisma.learningModule.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          topic: true,
+          version: true,
+          gradeLevel: true,
+          learningObjectives: true,
+          targetConcepts: true,
+          status: true,
+          caseId: true,
+          createdAt: true,
+          updatedAt: true,
+          case: {
+            select: {
+              id: true,
+              title: true,
+              context: true,
+              topic: true,
+              version: true,
+              validationStatus: true,
+            },
+          },
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Learning module published successfully",
+        data: publishedModule,
+      });
+    } catch (error) {
+      console.error("Failed to publish learning module:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to publish learning module",
+      });
+    }
+  }
+);
+
+// PATCH /api/modules/:id/archive
+// Archive a published learning module (ADMIN only)
+router.patch(
+  "/:id/archive",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const parsedId = moduleIdSchema.safeParse(req.params.id);
+
+    if (!parsedId.success) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid learning module ID",
+      });
+      return;
+    }
+
+    const id = parsedId.data;
+
+    try {
+      // Only published modules can be archived.
+      const result = await prisma.learningModule.updateMany({
+        where: {
+          id,
+          status: "PUBLISHED",
+        },
+        data: {
+          status: "ARCHIVED",
+        },
+      });
+
+      if (result.count === 0) {
+        const existingModule = await prisma.learningModule.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            status: true,
+          },
+        });
+
+        if (!existingModule) {
+          res.status(404).json({
+            success: false,
+            message: "Learning module not found",
+          });
+          return;
+        }
+
+        res.status(409).json({
+          success: false,
+          message: "Only published learning modules can be archived",
+        });
+        return;
+      }
+
+      const archivedModule = await prisma.learningModule.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          topic: true,
+          version: true,
+          gradeLevel: true,
+          learningObjectives: true,
+          targetConcepts: true,
+          status: true,
+          caseId: true,
+          createdAt: true,
+          updatedAt: true,
+          case: {
+            select: {
+              id: true,
+              title: true,
+              context: true,
+              topic: true,
+              version: true,
+              validationStatus: true,
+            },
+          },
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Learning module archived successfully",
+        data: archivedModule,
+      });
+    } catch (error) {
+      console.error("Failed to archive learning module:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to archive learning module",
+      });
+    }
+  }
+);
+
+// DELETE /api/modules/:id
+// Delete a draft learning module (ADMIN only)
+router.delete(
+  "/:id",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const parsedId = moduleIdSchema.safeParse(req.params.id);
+
+    if (!parsedId.success) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid learning module ID",
+      });
+      return;
+    }
+
+    const id = parsedId.data;
+
+    try {
+      // Only draft modules may be deleted.
+      const result = await prisma.learningModule.deleteMany({
+        where: {
+          id,
+          status: "DRAFT",
+        },
+      });
+
+      if (result.count === 0) {
+        const existingModule = await prisma.learningModule.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            status: true,
+          },
+        });
+
+        if (!existingModule) {
+          res.status(404).json({
+            success: false,
+            message: "Learning module not found",
+          });
+          return;
+        }
+
+        res.status(409).json({
+          success: false,
+          message: "Only draft learning modules can be deleted",
+        });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Draft learning module deleted successfully",
+        data: {
+          id,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Failed to delete learning module:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to delete learning module",
+      });
+    }
+  }
+);
+
 export default router;
