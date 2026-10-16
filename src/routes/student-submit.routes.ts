@@ -1,4 +1,3 @@
-
 import { Router } from "express";
 
 import { prisma } from "../lib/prisma";
@@ -11,7 +10,8 @@ const router = Router();
 
 // ==========================================
 // POST /api/student/attempts/:attemptId/submit
-// Submit assessment + automatically grade MCQs
+// Submit assigned pre-test + grade MCQs
+// + transition assignment to LEARNING
 // ==========================================
 
 router.post(
@@ -49,22 +49,67 @@ router.post(
     try {
       const result = await prisma.$transaction(
         async (tx) => {
-          // 3. Lock attempt to prevent simultaneous
-          // saving and submission
-          const locked = await tx.$queryRaw<
+          // ==========================================
+          // 3. Lock student's active assignment
+          // ==========================================
+
+          const lockedAssignments = await tx.$queryRaw<
             { id: string }[]
           >`
-            SELECT id FROM "AssessmentAttempt"
+            SELECT id
+            FROM "StudentModuleAssignment"
+            WHERE "studentId" = ${studentId}::uuid
+              AND "status" = 'ACTIVE'
+            FOR UPDATE
+          `;
+
+          if (lockedAssignments.length === 0) {
+            throw new Error("NO_ACTIVE_ASSIGNMENT");
+          }
+
+          // ==========================================
+          // 4. Retrieve active assignment
+          // ==========================================
+
+          const assignment =
+            await tx.studentModuleAssignment.findFirst({
+              where: {
+                studentId,
+                status: "ACTIVE",
+              },
+              select: {
+                id: true,
+                moduleId: true,
+                stage: true,
+              },
+            });
+
+          if (!assignment) {
+            throw new Error("NO_ACTIVE_ASSIGNMENT");
+          }
+
+          // ==========================================
+          // 5. Lock attempt
+          // ==========================================
+
+          const lockedAttempts = await tx.$queryRaw<
+            { id: string }[]
+          >`
+            SELECT id
+            FROM "AssessmentAttempt"
             WHERE id = ${attemptId}::uuid
               AND "studentId" = ${studentId}::uuid
             FOR UPDATE
           `;
 
-          if (locked.length === 0) {
+          if (lockedAttempts.length === 0) {
             throw new Error("ATTEMPT_NOT_FOUND");
           }
 
-          // 4. Retrieve attempt
+          // ==========================================
+          // 6. Retrieve attempt and assessment
+          // ==========================================
+
           const attempt =
             await tx.assessmentAttempt.findFirst({
               where: {
@@ -94,12 +139,33 @@ router.post(
             throw new Error("ATTEMPT_NOT_FOUND");
           }
 
-          // 5. Validate attempt status
+          // ==========================================
+          // 7. Validate assignment ownership
+          // ==========================================
+
+          if (
+            assignment.moduleId !==
+            attempt.assessment.moduleId
+          ) {
+            throw new Error("WRONG_MODULE");
+          }
+
+          if (assignment.stage !== "PRE_TEST") {
+            throw new Error("INVALID_STAGE");
+          }
+
+          // ==========================================
+          // 8. Validate attempt status
+          // ==========================================
+
           if (attempt.status !== "IN_PROGRESS") {
             throw new Error("ALREADY_SUBMITTED");
           }
 
-          // 6. Validate assessment availability
+          // ==========================================
+          // 9. Validate assessment availability
+          // ==========================================
+
           if (
             attempt.assessment.type !== "PRE_TEST" ||
             attempt.assessment.status !== "PUBLISHED" ||
@@ -109,7 +175,7 @@ router.post(
           }
 
           // ==========================================
-          // 7. Validate assessment completeness
+          // 10. Validate assessment completeness
           // ==========================================
 
           const totalQuestions =
@@ -137,7 +203,7 @@ router.post(
           }
 
           // ==========================================
-          // 8. Automatic MCQ grading
+          // 11. Retrieve MCQ questions
           // ==========================================
 
           const mcqQuestions =
@@ -181,7 +247,10 @@ router.post(
           let mcqMaxScore = 0;
           let mcqCorrectCount = 0;
 
-          // 9. Grade each MCQ
+          // ==========================================
+          // 12. Automatically grade MCQs
+          // ==========================================
+
           for (const question of mcqQuestions) {
             const studentAnswer = answerMap.get(
               question.id
@@ -223,7 +292,7 @@ router.post(
           }
 
           // ==========================================
-          // 10. Finalize submission
+          // 13. Submit pre-test
           // ==========================================
 
           const submitted =
@@ -244,6 +313,30 @@ router.post(
               },
             });
 
+          // ==========================================
+          // 14. Transition assignment to LEARNING
+          // ==========================================
+
+          const updatedAssignment =
+            await tx.studentModuleAssignment.update({
+              where: {
+                id: assignment.id,
+              },
+              data: {
+                stage: "LEARNING",
+              },
+              select: {
+                id: true,
+                moduleId: true,
+                status: true,
+                stage: true,
+              },
+            });
+
+          // ==========================================
+          // 15. Return transaction result
+          // ==========================================
+
           return {
             ...submitted,
             totalQuestions,
@@ -254,6 +347,7 @@ router.post(
               score: mcqTotalScore,
               maxScore: mcqMaxScore,
             },
+            moduleAssignment: updatedAssignment,
           };
         },
         {
@@ -262,10 +356,10 @@ router.post(
         }
       );
 
-      // 11. Success response
       res.status(200).json({
         success: true,
-        message: "Assessment submitted successfully",
+        message:
+          "Pre-test submitted successfully. Learning phase is now available.",
         data: result,
       });
     } catch (error) {
@@ -281,13 +375,30 @@ router.post(
           status: 404,
           message: "Assessment attempt not found",
         },
+        NO_ACTIVE_ASSIGNMENT: {
+          status: 403,
+          message:
+            "You do not have an active module assignment",
+        },
+        WRONG_MODULE: {
+          status: 403,
+          message:
+            "This assessment does not belong to your assigned module",
+        },
+        INVALID_STAGE: {
+          status: 409,
+          message:
+            "Your module assignment is not at the pre-test stage",
+        },
         ALREADY_SUBMITTED: {
           status: 409,
-          message: "Assessment has already been submitted",
+          message:
+            "Assessment has already been submitted",
         },
         ASSESSMENT_UNAVAILABLE: {
           status: 409,
-          message: "Assessment is no longer available",
+          message:
+            "Assessment is no longer available",
         },
         INCOMPLETE_ANSWERS: {
           status: 409,
@@ -314,13 +425,13 @@ router.post(
       }
 
       console.error(
-        "Failed to submit assessment:",
+        "Failed to submit pre-test:",
         error
       );
 
       res.status(500).json({
         success: false,
-        message: "Failed to submit assessment",
+        message: "Failed to submit pre-test",
       });
     }
   }

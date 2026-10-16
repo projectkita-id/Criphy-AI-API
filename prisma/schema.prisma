@@ -58,6 +58,22 @@ enum AttemptStatus {
 }
 
 // ==========================================
+// MODULE ASSIGNMENT ENUMS
+// ==========================================
+
+enum ModuleAssignmentStatus {
+  ACTIVE
+  COMPLETED
+}
+
+enum ModuleProgressStage {
+  PRE_TEST
+  LEARNING
+  POST_TEST
+  COMPLETED
+}
+
+// ==========================================
 // USER
 // ==========================================
 
@@ -75,6 +91,9 @@ model User {
 
   // Student assessment attempts
   assessmentAttempts AssessmentAttempt[]
+
+  // Student module assignments
+  moduleAssignments StudentModuleAssignment[]
 }
 
 // ==========================================
@@ -99,8 +118,9 @@ model ValidatedCase {
   // Validation workflow
   validationStatus CaseValidationStatus @default(DRAFT)
 
-  validatorId     String?   @db.Uuid
-  validator       User?     @relation("CaseValidator", fields: [validatorId], references: [id], onDelete: SetNull)
+  validatorId String? @db.Uuid
+  validator   User?   @relation("CaseValidator", fields: [validatorId], references: [id], onDelete: SetNull)
+
   validatedAt     DateTime?
   rejectionReason String?   @db.Text
 
@@ -143,6 +163,9 @@ model LearningModule {
 
   // Shared questions used by both tests
   assessmentQuestions AssessmentQuestion[]
+
+  // Student module assignments
+  studentAssignments StudentModuleAssignment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -224,16 +247,19 @@ model AssessmentQuestion {
 // ==========================================
 
 model AssessmentAttempt {
-  id           String             @id @default(uuid()) @db.Uuid
-  assessmentId String             @db.Uuid
-  assessment   Assessment         @relation(fields: [assessmentId], references: [id], onDelete: Restrict)
-  studentId    String             @db.Uuid
-  student      User               @relation(fields: [studentId], references: [id], onDelete: Restrict)
-  status       AttemptStatus      @default(IN_PROGRESS)
-  startedAt    DateTime           @default(now())
-  submittedAt  DateTime?
-  gradedAt     DateTime?
-  answers      AssessmentAnswer[]
+  id           String     @id @default(uuid()) @db.Uuid
+  assessmentId String     @db.Uuid
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Restrict)
+
+  studentId String @db.Uuid
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Restrict)
+
+  status      AttemptStatus @default(IN_PROGRESS)
+  startedAt   DateTime      @default(now())
+  submittedAt DateTime?
+  gradedAt    DateTime?
+
+  answers AssessmentAnswer[]
 
   @@unique([assessmentId, studentId])
   @@index([assessmentId])
@@ -268,4 +294,42 @@ model AssessmentAnswer {
   // One answer per question per attempt
   @@unique([attemptId, questionId])
   @@index([questionId])
+}
+
+// ==========================================
+// STUDENT MODULE ASSIGNMENT
+// ==========================================
+
+model StudentModuleAssignment {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Assigned student
+  studentId String @db.Uuid
+  student   User   @relation(fields: [studentId], references: [id], onDelete: Restrict)
+
+  // Assigned learning module
+  moduleId String         @db.Uuid
+  module   LearningModule @relation(fields: [moduleId], references: [id], onDelete: Restrict)
+
+  // Context selected by the student
+  context LearningContext
+
+  // Assignment lifecycle
+  status ModuleAssignmentStatus @default(ACTIVE)
+  stage  ModuleProgressStage    @default(PRE_TEST)
+
+  // Timestamps
+  assignedAt  DateTime  @default(now())
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Prevent assigning the same module twice
+  // to the same student
+  @@unique([studentId, moduleId])
+  // Query optimization
+  @@index([studentId, status])
+  @@index([moduleId])
+  @@index([context])
 }

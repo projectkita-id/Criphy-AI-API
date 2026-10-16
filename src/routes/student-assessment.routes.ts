@@ -224,140 +224,182 @@ router.get(
    }
  );
 
- // ==========================================
- // POST /api/student/assessments/:assessmentId/attempts
- // Start a pre-test attempt (STUDENT only)
- // ==========================================
+// ==========================================
+// POST /api/student/assessments/:assessmentId/attempts
+// Start a pre-test attempt (STUDENT only)
+// ==========================================
 
- router.post(
-   "/assessments/:assessmentId/attempts",
-   requireAuth,
-   requireRole("STUDENT"),
-   async (req, res) => {
-     // 1. Validate assessment ID
-     const parsedId = assessmentIdSchema.safeParse(
-       req.params.assessmentId
-     );
+router.post(
+  "/assessments/:assessmentId/attempts",
+  requireAuth,
+  requireRole("STUDENT"),
+  async (req, res) => {
+    // 1. Validate assessment ID
+    const parsedId = assessmentIdSchema.safeParse(
+      req.params.assessmentId
+    );
 
-     if (!parsedId.success) {
-       res.status(400).json({
-         success: false,
-         message: "Invalid assessment ID",
-       });
-       return;
-     }
+    if (!parsedId.success) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid assessment ID",
+      });
+      return;
+    }
 
-     const assessmentId = parsedId.data;
+    const assessmentId = parsedId.data;
+    const studentId = res.locals.user?.id;
 
-     // 2. Get student identity from authenticated session
-     // Adjust this line to match your auth middleware.
-     const studentId = res.locals.user?.id;
+    if (!studentId) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
 
-     if (!studentId) {
-       res.status(401).json({
-         success: false,
-         message: "Authentication required",
-       });
-       return;
-     }
+    try {
+      // 2. Verify published pre-test and module
+      const assessment = await prisma.assessment.findFirst({
+        where: {
+          id: assessmentId,
+          type: "PRE_TEST",
+          status: "PUBLISHED",
+          module: {
+            is: {
+              status: "PUBLISHED",
+            },
+          },
+        },
+        select: {
+          id: true,
+          moduleId: true,
+        },
+      });
 
-     try {
-       // 3. Verify published pre-test and module
-       const assessment = await prisma.assessment.findFirst({
-         where: {
-           id: assessmentId,
-           type: "PRE_TEST",
-           status: "PUBLISHED",
-           module: {
-             is: {
-               status: "PUBLISHED",
-             },
-           },
-         },
-         select: {
-           id: true,
-         },
-       });
+      if (!assessment) {
+        res.status(404).json({
+          success: false,
+          message: "Available pre-test not found",
+        });
+        return;
+      }
 
-       if (!assessment) {
-         res.status(404).json({
-           success: false,
-           message: "Available pre-test not found",
-         });
-         return;
-       }
+      // 3. Find student's active module assignment
+      const activeAssignment =
+        await prisma.studentModuleAssignment.findFirst({
+          where: {
+            studentId,
+            status: "ACTIVE",
+          },
+          select: {
+            id: true,
+            moduleId: true,
+            stage: true,
+          },
+        });
 
-       // 4. Check whether this student has an attempt
-       const existingAttempt =
-         await prisma.assessmentAttempt.findUnique({
-           where: {
-             assessmentId_studentId: {
-               assessmentId,
-               studentId,
-             },
-           },
-           select: {
-             id: true,
-           },
-         });
+      if (!activeAssignment) {
+        res.status(403).json({
+          success: false,
+          message:
+            "You must select a learning context and receive a module assignment before starting the pre-test",
+        });
+        return;
+      }
 
-       if (existingAttempt) {
-         res.status(409).json({
-           success: false,
-           message:
-             "You have already started this assessment",
-         });
-         return;
-       }
+      // 4. Verify that the assessment belongs
+      // to the student's assigned module
+      if (activeAssignment.moduleId !== assessment.moduleId) {
+        res.status(403).json({
+          success: false,
+          message:
+            "This pre-test does not belong to your assigned learning module",
+        });
+        return;
+      }
 
-       // 5. Create attempt
-       const attempt =
-         await prisma.assessmentAttempt.create({
-           data: {
-             assessmentId,
-             studentId,
-             status: "IN_PROGRESS",
-           },
-           select: {
-             id: true,
-             assessmentId: true,
-             status: true,
-             startedAt: true,
-           },
-         });
+      // 5. Verify the student's current stage
+      if (activeAssignment.stage !== "PRE_TEST") {
+        res.status(409).json({
+          success: false,
+          message:
+            "The pre-test is not available at your current learning stage",
+        });
+        return;
+      }
 
-       // 6. Return created attempt
-       res.status(201).json({
-         success: true,
-         message: "Pre-test attempt started successfully",
-         data: attempt,
-       });
-     } catch (error) {
-       // Handle simultaneous requests safely.
-       // The database unique constraint prevents duplicates.
-       if (
-         error instanceof Prisma.PrismaClientKnownRequestError &&
-         error.code === "P2002"
-       ) {
-         res.status(409).json({
-           success: false,
-           message:
-             "You have already started this assessment",
-         });
-         return;
-       }
+      // 6. Prevent duplicate attempts
+      const existingAttempt =
+        await prisma.assessmentAttempt.findUnique({
+          where: {
+            assessmentId_studentId: {
+              assessmentId,
+              studentId,
+            },
+          },
+          select: {
+            id: true,
+          },
+        });
 
-       console.error(
-         "Failed to start pre-test attempt:",
-         error
-       );
+      if (existingAttempt) {
+        res.status(409).json({
+          success: false,
+          message:
+            "You have already started this assessment",
+        });
+        return;
+      }
 
-       res.status(500).json({
-         success: false,
-         message: "Failed to start pre-test attempt",
-       });
-     }
-   }
- );
+      // 7. Create the pre-test attempt
+      const attempt =
+        await prisma.assessmentAttempt.create({
+          data: {
+            assessmentId,
+            studentId,
+            status: "IN_PROGRESS",
+          },
+          select: {
+            id: true,
+            assessmentId: true,
+            status: true,
+            startedAt: true,
+          },
+        });
+
+      // 8. Return created attempt
+      res.status(201).json({
+        success: true,
+        message: "Pre-test attempt started successfully",
+        data: attempt,
+      });
+    } catch (error) {
+      // Prevent duplicate attempts caused by
+      // simultaneous requests
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        res.status(409).json({
+          success: false,
+          message:
+            "You have already started this assessment",
+        });
+        return;
+      }
+
+      console.error(
+        "Failed to start pre-test attempt:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to start pre-test attempt",
+      });
+    }
+  }
+);
 
 export default router;
