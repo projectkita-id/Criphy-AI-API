@@ -48,3 +48,6 @@ export const createAssessmentQuestionSchema =
     mcqQuestionSchema,
     essayQuestionSchema,
   ]);
+
+export const updateAssessmentQuestionSchema =
+  createAssessmentQuestionSchema;
