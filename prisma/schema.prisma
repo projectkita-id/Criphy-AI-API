@@ -74,6 +74,21 @@ enum ModuleProgressStage {
 }
 
 // ==========================================
+// LEARNING SESSION ENUMS
+// ==========================================
+
+enum LearningSessionStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum LearningPhaseStatus {
+  LOCKED
+  ACTIVE
+  COMPLETED
+}
+
+// ==========================================
 // USER
 // ==========================================
 
@@ -318,6 +333,9 @@ model StudentModuleAssignment {
   status ModuleAssignmentStatus @default(ACTIVE)
   stage  ModuleProgressStage    @default(PRE_TEST)
 
+  // Learning session (created after pre-test)
+  learningSession LearningSession?
+
   // Timestamps
   assignedAt  DateTime  @default(now())
   completedAt DateTime?
@@ -332,4 +350,114 @@ model StudentModuleAssignment {
   @@index([studentId, status])
   @@index([moduleId])
   @@index([context])
+}
+
+// ==========================================
+// LEARNING SESSION
+// ==========================================
+
+model LearningSession {
+  id String @id @default(uuid()) @db.Uuid
+
+  // One session per module assignment
+  assignmentId String                  @unique @db.Uuid
+  assignment   StudentModuleAssignment @relation(fields: [assignmentId], references: [id], onDelete: Restrict)
+
+  // Learning session lifecycle
+  status       LearningSessionStatus @default(IN_PROGRESS)
+  currentPhase Int                   @default(1)
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  // Five learning phases
+  phases LearningPhaseProgress[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+// ==========================================
+// LEARNING PHASE PROGRESS
+// ==========================================
+
+model LearningPhaseProgress {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Parent learning session
+  sessionId String          @db.Uuid
+  session   LearningSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+
+  // Phase number: 1, 2, 3, 4, or 5
+  phaseNumber Int
+
+  // Phase lifecycle
+  status LearningPhaseStatus @default(LOCKED)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  // Student responses and AI feedback
+  responses LearningPhaseResponse[]
+
+  // Structured phase submission
+  submission LearningPhaseSubmission?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One progress record per phase per session
+  @@unique([sessionId, phaseNumber])
+  @@index([status])
+}
+
+// ==========================================
+// LEARNING PHASE RESPONSE
+// ==========================================
+
+model LearningPhaseResponse {
+  id String @id @default(uuid()) @db.Uuid
+
+  // Parent learning phase
+  phaseProgressId String                @db.Uuid
+  phaseProgress   LearningPhaseProgress @relation(fields: [phaseProgressId], references: [id], onDelete: Restrict)
+
+  // Student's response
+  answer String @db.Text
+
+  // Optional AI-generated content and feedback
+  question   String? @db.Text
+  aiFeedback String? @db.Text
+  aiMetadata Json?
+
+  // Response history
+  createdAt DateTime @default(now())
+
+  @@index([phaseProgressId, createdAt])
+}
+
+// ==========================================
+// LEARNING PHASE SUBMISSION
+// ==========================================
+
+model LearningPhaseSubmission {
+  id String @id @default(uuid()) @db.Uuid
+
+  // One structured submission per phase
+  phaseProgressId String                @unique @db.Uuid
+  phaseProgress   LearningPhaseProgress @relation(fields: [phaseProgressId], references: [id], onDelete: Restrict)
+
+  // Phase-specific structured answers
+  // Phase 1: prediction, reasoning, confidence
+  // Phase 4: claim, evidence, reasoning,
+  //          alternativeArgument, revision
+  content Json
+
+  // Submission lifecycle
+  submittedAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
