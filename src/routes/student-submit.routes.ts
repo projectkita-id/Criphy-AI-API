@@ -8,10 +8,11 @@ import { attemptIdSchema } from "../validators/assessment-answer.validator";
 
 const router = Router();
 
+
 // ==========================================
 // POST /api/student/attempts/:attemptId/submit
-// Submit assigned pre-test + grade MCQs
-// + transition assignment to LEARNING
+// Submit pre-test or post-test, grade MCQs,
+// and advance the student's module assignment
 // ==========================================
 
 router.post(
@@ -81,6 +82,17 @@ router.post(
                 id: true,
                 moduleId: true,
                 stage: true,
+                learningSession: {
+                  select: {
+                    status: true,
+                    phases: {
+                      select: {
+                        phaseNumber: true,
+                        status: true,
+                      },
+                    },
+                  },
+                },
               },
             });
 
@@ -89,7 +101,7 @@ router.post(
           }
 
           // ==========================================
-          // 5. Lock attempt
+          // 5. Lock student's attempt
           // ==========================================
 
           const lockedAttempts = await tx.$queryRaw<
@@ -150,12 +162,24 @@ router.post(
             throw new Error("WRONG_MODULE");
           }
 
-          if (assignment.stage !== "PRE_TEST") {
+          // ==========================================
+          // 8. Validate learning stage
+          // ==========================================
+
+          const assessmentType =
+            attempt.assessment.type;
+
+          const requiredStage =
+            assessmentType === "PRE_TEST"
+              ? "PRE_TEST"
+              : "POST_TEST";
+
+          if (assignment.stage !== requiredStage) {
             throw new Error("INVALID_STAGE");
           }
 
           // ==========================================
-          // 8. Validate attempt status
+          // 9. Validate attempt status
           // ==========================================
 
           if (attempt.status !== "IN_PROGRESS") {
@@ -163,11 +187,10 @@ router.post(
           }
 
           // ==========================================
-          // 9. Validate assessment availability
+          // 10. Validate assessment availability
           // ==========================================
 
           if (
-            attempt.assessment.type !== "PRE_TEST" ||
             attempt.assessment.status !== "PUBLISHED" ||
             attempt.assessment.module.status !== "PUBLISHED"
           ) {
@@ -175,7 +198,31 @@ router.post(
           }
 
           // ==========================================
-          // 10. Validate assessment completeness
+          // 11. Verify post-test prerequisites
+          // ==========================================
+
+          if (assessmentType === "POST_TEST") {
+            const session = assignment.learningSession;
+
+            if (
+              !session ||
+              session.status !== "COMPLETED" ||
+              session.phases.length !== 5 ||
+              session.phases.some(
+                (phase) => phase.status !== "COMPLETED"
+              ) ||
+              new Set(
+                session.phases.map(
+                  (phase) => phase.phaseNumber
+                )
+              ).size !== 5
+            ) {
+              throw new Error("LEARNING_NOT_COMPLETED");
+            }
+          }
+
+          // ==========================================
+          // 12. Validate answer completeness
           // ==========================================
 
           const totalQuestions =
@@ -203,7 +250,7 @@ router.post(
           }
 
           // ==========================================
-          // 11. Retrieve MCQ questions
+          // 13. Retrieve MCQ questions and answers
           // ==========================================
 
           const mcqQuestions =
@@ -248,7 +295,7 @@ router.post(
           let mcqCorrectCount = 0;
 
           // ==========================================
-          // 12. Automatically grade MCQs
+          // 14. Automatically grade MCQs
           // ==========================================
 
           for (const question of mcqQuestions) {
@@ -292,8 +339,10 @@ router.post(
           }
 
           // ==========================================
-          // 13. Submit pre-test
+          // 15. Submit assessment attempt
           // ==========================================
+
+          const submittedAt = new Date();
 
           const submitted =
             await tx.assessmentAttempt.update({
@@ -302,7 +351,7 @@ router.post(
               },
               data: {
                 status: "PENDING_GRADING",
-                submittedAt: new Date(),
+                submittedAt,
               },
               select: {
                 id: true,
@@ -314,31 +363,42 @@ router.post(
             });
 
           // ==========================================
-          // 14. Transition assignment to LEARNING
+          // 16. Advance module assignment
           // ==========================================
+
+          const isPostTest =
+            assessmentType === "POST_TEST";
 
           const updatedAssignment =
             await tx.studentModuleAssignment.update({
               where: {
                 id: assignment.id,
               },
-              data: {
-                stage: "LEARNING",
-              },
+              data: isPostTest
+                ? {
+                    stage: "COMPLETED",
+                    status: "COMPLETED",
+                    completedAt: submittedAt,
+                  }
+                : {
+                    stage: "LEARNING",
+                  },
               select: {
                 id: true,
                 moduleId: true,
                 status: true,
                 stage: true,
+                completedAt: true,
               },
             });
 
           // ==========================================
-          // 15. Return transaction result
+          // 17. Return transaction result
           // ==========================================
 
           return {
             ...submitted,
+            assessmentType,
             totalQuestions,
             answeredQuestions,
             mcqGrading: {
@@ -356,15 +416,23 @@ router.post(
         }
       );
 
+      // ==========================================
+      // 18. Return successful response
+      // ==========================================
+
+      const isPostTest =
+        result.assessmentType === "POST_TEST";
+
       res.status(200).json({
         success: true,
-        message:
-          "Pre-test submitted successfully. Learning phase is now available.",
+        message: isPostTest
+          ? "Post-test submitted successfully. Module completed."
+          : "Pre-test submitted successfully. Learning phase is now available.",
         data: result,
       });
     } catch (error) {
       // ==========================================
-      // Error handling
+      // 19. Handle expected errors
       // ==========================================
 
       const knownErrors: Record<
@@ -388,7 +456,7 @@ router.post(
         INVALID_STAGE: {
           status: 409,
           message:
-            "Your module assignment is not at the pre-test stage",
+            "This assessment is not available at your current learning stage",
         },
         ALREADY_SUBMITTED: {
           status: 409,
@@ -399,6 +467,11 @@ router.post(
           status: 409,
           message:
             "Assessment is no longer available",
+        },
+        LEARNING_NOT_COMPLETED: {
+          status: 409,
+          message:
+            "All five learning phases must be completed before submitting the post-test",
         },
         INCOMPLETE_ANSWERS: {
           status: 409,
@@ -425,16 +498,15 @@ router.post(
       }
 
       console.error(
-        "Failed to submit pre-test:",
+        "Failed to submit assessment:",
         error
       );
 
       res.status(500).json({
         success: false,
-        message: "Failed to submit pre-test",
+        message: "Failed to submit assessment",
       });
     }
   }
 );
-
 export default router;

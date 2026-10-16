@@ -13,7 +13,7 @@ const router = Router();
 
 // ==========================================
 // PUT /api/student/attempts/:attemptId/answers
-// Save multiple answers in one transaction
+// Save pre-test or post-test answers
 // ==========================================
 
 router.put(
@@ -21,7 +21,10 @@ router.put(
   requireAuth,
   requireRole("STUDENT"),
   async (req, res) => {
+    // ==========================================
     // 1. Validate attempt ID
+    // ==========================================
+
     const parsedId = attemptIdSchema.safeParse(
       req.params.attemptId
     );
@@ -34,7 +37,10 @@ router.put(
       return;
     }
 
+    // ==========================================
     // 2. Validate request body
+    // ==========================================
+
     const parsedBody = saveAssessmentAnswersSchema.safeParse(
       req.body
     );
@@ -51,7 +57,10 @@ router.put(
     const attemptId = parsedId.data;
     const answers = parsedBody.data.answers;
 
-    // 3. Use the authenticated student's ID
+    // ==========================================
+    // 3. Get authenticated student
+    // ==========================================
+
     const studentId: string | undefined =
       res.locals.user?.id;
 
@@ -66,12 +75,66 @@ router.put(
     try {
       const savedAnswers = await prisma.$transaction(
         async (tx) => {
-          // Lock attempt to prevent concurrent writes
-          // and coordinate with future submission.
+          // ==========================================
+          // 4. Lock active assignment first
+          // Keep lock order consistent with submission
+          // ==========================================
+
+          const lockedAssignments = await tx.$queryRaw<
+            { id: string }[]
+          >`
+            SELECT id
+            FROM "StudentModuleAssignment"
+            WHERE "studentId" = ${studentId}::uuid
+              AND "status" = 'ACTIVE'
+            FOR UPDATE
+          `;
+
+          if (lockedAssignments.length === 0) {
+            throw new Error("NO_ACTIVE_ASSIGNMENT");
+          }
+
+          // ==========================================
+          // 5. Retrieve active assignment
+          // ==========================================
+
+          const assignment =
+            await tx.studentModuleAssignment.findFirst({
+              where: {
+                studentId,
+                status: "ACTIVE",
+              },
+              select: {
+                id: true,
+                moduleId: true,
+                stage: true,
+                learningSession: {
+                  select: {
+                    status: true,
+                    phases: {
+                      select: {
+                        phaseNumber: true,
+                        status: true,
+                      },
+                    },
+                  },
+                },
+              },
+            });
+
+          if (!assignment) {
+            throw new Error("NO_ACTIVE_ASSIGNMENT");
+          }
+
+          // ==========================================
+          // 6. Lock attempt
+          // ==========================================
+
           const lockedAttempts = await tx.$queryRaw<
             { id: string }[]
           >`
-            SELECT id FROM "AssessmentAttempt"
+            SELECT id
+            FROM "AssessmentAttempt"
             WHERE id = ${attemptId}::uuid
               AND "studentId" = ${studentId}::uuid
             FOR UPDATE
@@ -81,7 +144,10 @@ router.put(
             throw new Error("ATTEMPT_NOT_FOUND");
           }
 
-          // 4. Verify attempt ownership and status
+          // ==========================================
+          // 7. Retrieve attempt and assessment
+          // ==========================================
+
           const attempt =
             await tx.assessmentAttempt.findFirst({
               where: {
@@ -110,19 +176,77 @@ router.put(
             throw new Error("ATTEMPT_NOT_FOUND");
           }
 
+          // ==========================================
+          // 8. Verify attempt is editable
+          // ==========================================
+
           if (attempt.status !== "IN_PROGRESS") {
             throw new Error("ATTEMPT_NOT_EDITABLE");
           }
 
+          // ==========================================
+          // 9. Verify assessment availability
+          // ==========================================
+
           if (
-            attempt.assessment.type !== "PRE_TEST" ||
             attempt.assessment.status !== "PUBLISHED" ||
             attempt.assessment.module.status !== "PUBLISHED"
           ) {
             throw new Error("ASSESSMENT_UNAVAILABLE");
           }
 
-          // 5. Fetch all submitted question IDs
+          // ==========================================
+          // 10. Verify assigned module
+          // ==========================================
+
+          if (
+            assignment.moduleId !==
+            attempt.assessment.moduleId
+          ) {
+            throw new Error("WRONG_MODULE");
+          }
+
+          // ==========================================
+          // 11. Verify learning stage
+          // ==========================================
+
+          const requiredStage =
+            attempt.assessment.type === "PRE_TEST"
+              ? "PRE_TEST"
+              : "POST_TEST";
+
+          if (assignment.stage !== requiredStage) {
+            throw new Error("INVALID_STAGE");
+          }
+
+          // ==========================================
+          // 12. Verify post-test prerequisites
+          // ==========================================
+
+          if (attempt.assessment.type === "POST_TEST") {
+            const session = assignment.learningSession;
+
+            if (
+              !session ||
+              session.status !== "COMPLETED" ||
+              session.phases.length !== 5 ||
+              session.phases.some(
+                (phase) => phase.status !== "COMPLETED"
+              ) ||
+              new Set(
+                session.phases.map(
+                  (phase) => phase.phaseNumber
+                )
+              ).size !== 5
+            ) {
+              throw new Error("LEARNING_NOT_COMPLETED");
+            }
+          }
+
+          // ==========================================
+          // 13. Fetch submitted questions
+          // ==========================================
+
           const questionIds = answers.map(
             (item) => item.questionId
           );
@@ -130,7 +254,9 @@ router.put(
           const questions =
             await tx.assessmentQuestion.findMany({
               where: {
-                id: { in: questionIds },
+                id: {
+                  in: questionIds,
+                },
                 moduleId: attempt.assessment.moduleId,
               },
               select: {
@@ -151,7 +277,10 @@ router.put(
             ])
           );
 
-          // 6. Validate every submitted answer
+          // ==========================================
+          // 14. Validate submitted answers
+          // ==========================================
+
           for (const item of answers) {
             const question = questionMap.get(
               item.questionId
@@ -186,8 +315,10 @@ router.put(
             }
           }
 
-          // 7. Create or update all answers
-          // Every operation belongs to one transaction.
+          // ==========================================
+          // 15. Save or update answers
+          // ==========================================
+
           const results = [];
 
           for (const item of answers) {
@@ -206,6 +337,9 @@ router.put(
                 },
                 update: {
                   answer: item.answer,
+                  score: null,
+                  feedback: null,
+                  gradedAt: null,
                 },
                 select: {
                   id: true,
@@ -225,6 +359,10 @@ router.put(
         }
       );
 
+      // ==========================================
+      // 16. Return saved answers
+      // ==========================================
+
       res.status(200).json({
         success: true,
         message: "Answers saved successfully",
@@ -235,6 +373,10 @@ router.put(
         },
       });
     } catch (error) {
+      // ==========================================
+      // 17. Handle expected errors
+      // ==========================================
+
       const knownErrors: Record<
         string,
         { status: number; message: string }
@@ -243,9 +385,30 @@ router.put(
           status: 404,
           message: "Assessment attempt not found",
         },
+        NO_ACTIVE_ASSIGNMENT: {
+          status: 403,
+          message:
+            "You do not have an active module assignment",
+        },
+        WRONG_MODULE: {
+          status: 403,
+          message:
+            "This assessment does not belong to your assigned module",
+        },
+        INVALID_STAGE: {
+          status: 409,
+          message:
+            "This assessment is not available at your current learning stage",
+        },
+        LEARNING_NOT_COMPLETED: {
+          status: 409,
+          message:
+            "All five learning phases must be completed before answering the post-test",
+        },
         ATTEMPT_NOT_EDITABLE: {
           status: 409,
-          message: "This assessment attempt is no longer editable",
+          message:
+            "This assessment attempt is no longer editable",
         },
         ASSESSMENT_UNAVAILABLE: {
           status: 409,
@@ -253,15 +416,18 @@ router.put(
         },
         QUESTION_NOT_FOUND: {
           status: 404,
-          message: "One or more questions do not belong to this assessment",
+          message:
+            "One or more questions do not belong to this assessment",
         },
         INVALID_QUESTION_OPTIONS: {
           status: 409,
-          message: "One or more questions have invalid options",
+          message:
+            "One or more questions have invalid options",
         },
         INVALID_MCQ_ANSWER: {
           status: 400,
-          message: "One or more MCQ answers are invalid",
+          message:
+            "One or more MCQ answers are invalid",
         },
       };
 
@@ -290,11 +456,20 @@ router.put(
   }
 );
 
+// ==========================================
+// GET /api/student/attempts/:attemptId/answers
+// Retrieve saved pre-test or post-test answers
+// ==========================================
+
 router.get(
   "/attempts/:attemptId/answers",
   requireAuth,
   requireRole("STUDENT"),
   async (req, res) => {
+    // ==========================================
+    // 1. Validate attempt ID
+    // ==========================================
+
     const parsedId = attemptIdSchema.safeParse(
       req.params.attemptId
     );
@@ -306,6 +481,10 @@ router.get(
       });
       return;
     }
+
+    // ==========================================
+    // 2. Get authenticated student
+    // ==========================================
 
     const studentId: string | undefined =
       res.locals.user?.id;
@@ -319,6 +498,10 @@ router.get(
     }
 
     try {
+      // ==========================================
+      // 3. Retrieve owned assessment attempt
+      // ==========================================
+
       const attempt =
         await prisma.assessmentAttempt.findFirst({
           where: {
@@ -365,8 +548,11 @@ router.get(
         return;
       }
 
+      // ==========================================
+      // 4. Verify assessment availability
+      // ==========================================
+
       if (
-        attempt.assessment.type !== "PRE_TEST" ||
         attempt.assessment.status !== "PUBLISHED" ||
         attempt.assessment.module.status !== "PUBLISHED"
       ) {
@@ -376,6 +562,10 @@ router.get(
         });
         return;
       }
+
+      // ==========================================
+      // 5. Return saved answers
+      // ==========================================
 
       res.status(200).json({
         success: true,

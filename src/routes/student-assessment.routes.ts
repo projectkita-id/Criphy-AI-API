@@ -123,9 +123,10 @@ router.get(
   }
 );
 
+
  // ==========================================
  // GET /api/student/assessments/:assessmentId
- // Retrieve published pre-test questions (STUDENT only)
+ // Retrieve assigned pre-test or post-test questions
  // ==========================================
 
  router.get(
@@ -133,6 +134,7 @@ router.get(
    requireAuth,
    requireRole("STUDENT"),
    async (req, res) => {
+     // 1. Validate assessment ID
      const parsedId = assessmentIdSchema.safeParse(
        req.params.assessmentId
      );
@@ -145,33 +147,45 @@ router.get(
        return;
      }
 
-     try {
-       // Find published assessment in a published module.
-       const assessment = await prisma.assessment.findFirst({
-         where: {
-           id: parsedId.data,
-           status: "PUBLISHED",
-           type: "PRE_TEST",
-           module: {
-             is: {
-               status: "PUBLISHED",
-             },
-           },
-         },
-         select: {
-           id: true,
-           title: true,
-           type: true,
-           status: true,
-           moduleId: true,
-           module: {
-             select: {
-               title: true,
-               topic: true,
-             },
-           },
-         },
+     // 2. Get authenticated student
+     const studentId: string | undefined =
+       res.locals.user?.id;
+
+     if (!studentId) {
+       res.status(401).json({
+         success: false,
+         message: "Authentication required",
        });
+       return;
+     }
+
+     try {
+       // 3. Find published assessment and module
+       const assessment =
+         await prisma.assessment.findFirst({
+           where: {
+             id: parsedId.data,
+             status: "PUBLISHED",
+             module: {
+               is: {
+                 status: "PUBLISHED",
+               },
+             },
+           },
+           select: {
+             id: true,
+             title: true,
+             type: true,
+             status: true,
+             moduleId: true,
+             module: {
+               select: {
+                 title: true,
+                 topic: true,
+               },
+             },
+           },
+         });
 
        if (!assessment) {
          res.status(404).json({
@@ -181,8 +195,54 @@ router.get(
          return;
        }
 
-       // Shared questions belong to the Learning Module,
-       // not directly to the assessment.
+       // 4. Find student's active assignment
+       const assignment =
+         await prisma.studentModuleAssignment.findFirst({
+           where: {
+             studentId,
+             status: "ACTIVE",
+           },
+           select: {
+             moduleId: true,
+             stage: true,
+           },
+         });
+
+       if (!assignment) {
+         res.status(403).json({
+           success: false,
+           message:
+             "You do not have an active module assignment",
+         });
+         return;
+       }
+
+       // 5. Verify assessment belongs to assigned module
+       if (assignment.moduleId !== assessment.moduleId) {
+         res.status(403).json({
+           success: false,
+           message:
+             "This assessment does not belong to your assigned learning module",
+         });
+         return;
+       }
+
+       // 6. Enforce assessment stage
+       const requiredStage =
+         assessment.type === "PRE_TEST"
+           ? "PRE_TEST"
+           : "POST_TEST";
+
+       if (assignment.stage !== requiredStage) {
+         res.status(409).json({
+           success: false,
+           message:
+             `This ${assessment.type.toLowerCase().replace("_", "-")} is not available at your current learning stage`,
+         });
+         return;
+       }
+
+       // 7. Retrieve shared questions
        const questions =
          await prisma.assessmentQuestion.findMany({
            where: {
@@ -201,6 +261,7 @@ router.get(
            },
          });
 
+       // 8. Return safe assessment data
        res.status(200).json({
          success: true,
          message: "Assessment retrieved successfully",
@@ -224,9 +285,10 @@ router.get(
    }
  );
 
+
 // ==========================================
 // POST /api/student/assessments/:assessmentId/attempts
-// Start a pre-test attempt (STUDENT only)
+// Start pre-test or post-test attempt
 // ==========================================
 
 router.post(
@@ -248,7 +310,8 @@ router.post(
     }
 
     const assessmentId = parsedId.data;
-    const studentId = res.locals.user?.id;
+    const studentId: string | undefined =
+      res.locals.user?.id;
 
     if (!studentId) {
       res.status(401).json({
@@ -259,124 +322,255 @@ router.post(
     }
 
     try {
-      // 2. Verify published pre-test and module
-      const assessment = await prisma.assessment.findFirst({
-        where: {
-          id: assessmentId,
-          type: "PRE_TEST",
-          status: "PUBLISHED",
-          module: {
-            is: {
-              status: "PUBLISHED",
-            },
-          },
+      const result = await prisma.$transaction(
+        async (tx) => {
+          // ==========================================
+          // 2. Lock student's active assignment
+          // ==========================================
+
+          const lockedAssignments = await tx.$queryRaw<
+            { id: string }[]
+          >`
+            SELECT id
+            FROM "StudentModuleAssignment"
+            WHERE "studentId" = ${studentId}::uuid
+              AND "status" = 'ACTIVE'
+            FOR UPDATE
+          `;
+
+          if (lockedAssignments.length === 0) {
+            return {
+              error: "NO_ACTIVE_ASSIGNMENT" as const,
+            };
+          }
+
+          // ==========================================
+          // 3. Retrieve active assignment
+          // ==========================================
+
+          const assignment =
+            await tx.studentModuleAssignment.findFirst({
+              where: {
+                studentId,
+                status: "ACTIVE",
+              },
+              select: {
+                id: true,
+                moduleId: true,
+                stage: true,
+                learningSession: {
+                  select: {
+                    status: true,
+                    phases: {
+                      select: {
+                        phaseNumber: true,
+                        status: true,
+                      },
+                    },
+                  },
+                },
+              },
+            });
+
+          if (!assignment) {
+            return {
+              error: "NO_ACTIVE_ASSIGNMENT" as const,
+            };
+          }
+
+          // ==========================================
+          // 4. Retrieve published assessment
+          // ==========================================
+
+          const assessment =
+            await tx.assessment.findFirst({
+              where: {
+                id: assessmentId,
+                status: "PUBLISHED",
+                module: {
+                  is: {
+                    status: "PUBLISHED",
+                  },
+                },
+              },
+              select: {
+                id: true,
+                moduleId: true,
+                type: true,
+              },
+            });
+
+          if (!assessment) {
+            return {
+              error: "ASSESSMENT_NOT_FOUND" as const,
+            };
+          }
+
+          // ==========================================
+          // 5. Validate module ownership
+          // ==========================================
+
+          if (assignment.moduleId !== assessment.moduleId) {
+            return {
+              error: "WRONG_MODULE" as const,
+            };
+          }
+
+          // ==========================================
+          // 6. Validate learning stage
+          // ==========================================
+
+          const requiredStage =
+            assessment.type === "PRE_TEST"
+              ? "PRE_TEST"
+              : "POST_TEST";
+
+          if (assignment.stage !== requiredStage) {
+            return {
+              error: "INVALID_STAGE" as const,
+            };
+          }
+
+          // ==========================================
+          // 7. Validate post-test prerequisites
+          // ==========================================
+
+          if (assessment.type === "POST_TEST") {
+            const session = assignment.learningSession;
+
+            if (
+              !session ||
+              session.status !== "COMPLETED" ||
+              session.phases.length !== 5 ||
+              session.phases.some(
+                (phase) => phase.status !== "COMPLETED"
+              ) ||
+              new Set(
+                session.phases.map(
+                  (phase) => phase.phaseNumber
+                )
+              ).size !== 5
+            ) {
+              return {
+                error: "LEARNING_NOT_COMPLETED" as const,
+              };
+            }
+          }
+
+          // ==========================================
+          // 8. Prevent duplicate attempts
+          // ==========================================
+
+          const existingAttempt =
+            await tx.assessmentAttempt.findUnique({
+              where: {
+                assessmentId_studentId: {
+                  assessmentId,
+                  studentId,
+                },
+              },
+              select: {
+                id: true,
+              },
+            });
+
+          if (existingAttempt) {
+            return {
+              error: "ALREADY_STARTED" as const,
+            };
+          }
+
+          // ==========================================
+          // 9. Create assessment attempt
+          // ==========================================
+
+          const attempt =
+            await tx.assessmentAttempt.create({
+              data: {
+                assessmentId,
+                studentId,
+                status: "IN_PROGRESS",
+              },
+              select: {
+                id: true,
+                assessmentId: true,
+                status: true,
+                startedAt: true,
+              },
+            });
+
+          return {
+            created: true as const,
+            attempt,
+            assessmentType: assessment.type,
+          };
         },
-        select: {
-          id: true,
-          moduleId: true,
-        },
-      });
+        {
+          maxWait: 5000,
+          timeout: 10000,
+        }
+      );
 
-      if (!assessment) {
-        res.status(404).json({
+      // ==========================================
+      // 10. Handle expected errors
+      // ==========================================
+
+      if ("error" in result && result.error !== undefined) {
+        const errors = {
+          NO_ACTIVE_ASSIGNMENT: {
+            status: 403,
+            message:
+              "You must have an active module assignment before starting an assessment",
+          },
+          ASSESSMENT_NOT_FOUND: {
+            status: 404,
+            message: "Available assessment not found",
+          },
+          WRONG_MODULE: {
+            status: 403,
+            message:
+              "This assessment does not belong to your assigned learning module",
+          },
+          INVALID_STAGE: {
+            status: 409,
+            message:
+              "This assessment is not available at your current learning stage",
+          },
+          LEARNING_NOT_COMPLETED: {
+            status: 409,
+            message:
+              "You must complete all five learning phases before starting the post-test",
+          },
+          ALREADY_STARTED: {
+            status: 409,
+            message:
+              "You have already started this assessment",
+          },
+        };
+
+        const error = errors[result.error];
+
+        res.status(error.status).json({
           success: false,
-          message: "Available pre-test not found",
+          message: error.message,
         });
         return;
       }
 
-      // 3. Find student's active module assignment
-      const activeAssignment =
-        await prisma.studentModuleAssignment.findFirst({
-          where: {
-            studentId,
-            status: "ACTIVE",
-          },
-          select: {
-            id: true,
-            moduleId: true,
-            stage: true,
-          },
-        });
+      // ==========================================
+      // 11. Return created attempt
+      // ==========================================
 
-      if (!activeAssignment) {
-        res.status(403).json({
-          success: false,
-          message:
-            "You must select a learning context and receive a module assignment before starting the pre-test",
-        });
-        return;
-      }
-
-      // 4. Verify that the assessment belongs
-      // to the student's assigned module
-      if (activeAssignment.moduleId !== assessment.moduleId) {
-        res.status(403).json({
-          success: false,
-          message:
-            "This pre-test does not belong to your assigned learning module",
-        });
-        return;
-      }
-
-      // 5. Verify the student's current stage
-      if (activeAssignment.stage !== "PRE_TEST") {
-        res.status(409).json({
-          success: false,
-          message:
-            "The pre-test is not available at your current learning stage",
-        });
-        return;
-      }
-
-      // 6. Prevent duplicate attempts
-      const existingAttempt =
-        await prisma.assessmentAttempt.findUnique({
-          where: {
-            assessmentId_studentId: {
-              assessmentId,
-              studentId,
-            },
-          },
-          select: {
-            id: true,
-          },
-        });
-
-      if (existingAttempt) {
-        res.status(409).json({
-          success: false,
-          message:
-            "You have already started this assessment",
-        });
-        return;
-      }
-
-      // 7. Create the pre-test attempt
-      const attempt =
-        await prisma.assessmentAttempt.create({
-          data: {
-            assessmentId,
-            studentId,
-            status: "IN_PROGRESS",
-          },
-          select: {
-            id: true,
-            assessmentId: true,
-            status: true,
-            startedAt: true,
-          },
-        });
-
-      // 8. Return created attempt
       res.status(201).json({
         success: true,
-        message: "Pre-test attempt started successfully",
-        data: attempt,
+        message:
+          result.assessmentType === "PRE_TEST"
+            ? "Pre-test attempt started successfully"
+            : "Post-test attempt started successfully",
+        data: result.attempt,
       });
     } catch (error) {
-      // Prevent duplicate attempts caused by
-      // simultaneous requests
+      // Handle simultaneous duplicate requests
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === "P2002"
@@ -390,13 +584,13 @@ router.post(
       }
 
       console.error(
-        "Failed to start pre-test attempt:",
+        "Failed to start assessment attempt:",
         error
       );
 
       res.status(500).json({
         success: false,
-        message: "Failed to start pre-test attempt",
+        message: "Failed to start assessment attempt",
       });
     }
   }
