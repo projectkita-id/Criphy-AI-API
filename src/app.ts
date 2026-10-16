@@ -13,6 +13,7 @@ import moduleRoutes from "./routes/module.routes";
 import studentModuleRoutes from "./routes/student-module.routes";
 import assessmentRoutes from "./routes/assessment.routes";
 import assessmentQuestionRoutes from "./routes/assessment-question.routes";
+import studentAssessmentRoutes from "./routes/student-assessment.routes";
 
 const app = express();
 
@@ -37,5 +38,6 @@ app.use("/api/modules", moduleRoutes);
 app.use("/api/student/modules", studentModuleRoutes);
 app.use("/api/assessments", assessmentRoutes);
 app.use("/api/modules", assessmentQuestionRoutes);
+app.use("/api/student", studentAssessmentRoutes);
 
 export default app;
