@@ -15,6 +15,8 @@ import {
   validateLearningPhaseSubmission,
 } from "../validators/learning-phase-submission.validator";
 
+import { AITutorService } from "../services/ai-tutor.service";
+
 const router = Router();
 
 // ==========================================
@@ -434,6 +436,130 @@ router.get(
   }
 );
 
+// ==========================================
+// GET /api/student/learning-sessions/:sessionId/phases/:phase/messages
+// Retrieve conversation history & submission for a phase
+// ==========================================
+
+router.get(
+  "/learning-sessions/:sessionId/phases/:phase/messages",
+  requireAuth,
+  requireRole("STUDENT"),
+  async (req, res) => {
+    const studentId: string | undefined = res.locals.user?.id;
+
+    if (!studentId) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
+
+    const parsedParams = learningPhaseParamsSchema.safeParse(req.params);
+
+    if (!parsedParams.success) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid learning phase parameters",
+        errors: parsedParams.error.flatten(),
+      });
+      return;
+    }
+
+    const { sessionId, phase: phaseNumber } = parsedParams.data;
+
+    try {
+      const session = await prisma.learningSession.findFirst({
+        where: {
+          id: sessionId,
+          assignment: {
+            studentId,
+          },
+        },
+        select: {
+          id: true,
+          status: true,
+          currentPhase: true,
+          phases: {
+            where: {
+              phaseNumber,
+            },
+            select: {
+              id: true,
+              phaseNumber: true,
+              status: true,
+              startedAt: true,
+              completedAt: true,
+              submission: {
+                select: {
+                  id: true,
+                  content: true,
+                  submittedAt: true,
+                },
+              },
+              responses: {
+                orderBy: {
+                  createdAt: "asc",
+                },
+                select: {
+                  id: true,
+                  answer: true,
+                  question: true,
+                  aiFeedback: true,
+                  aiMetadata: true,
+                  createdAt: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+      if (!session) {
+        res.status(404).json({
+          success: false,
+          message: "Learning session not found",
+        });
+        return;
+      }
+
+      const phase = session.phases[0];
+
+      if (!phase) {
+        res.status(404).json({
+          success: false,
+          message: "Learning phase not found",
+        });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Learning phase messages retrieved successfully",
+        data: {
+          sessionId: session.id,
+          currentPhase: session.currentPhase,
+          phase: {
+            id: phase.id,
+            phaseNumber: phase.phaseNumber,
+            status: phase.status,
+            startedAt: phase.startedAt,
+            completedAt: phase.completedAt,
+            submission: phase.submission,
+            messages: phase.responses,
+          },
+        },
+      });
+    } catch (error) {
+      console.error("Failed to retrieve phase messages:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve phase messages",
+      });
+    }
+  }
+);
 
 // ==========================================
 // POST /api/student/learning-sessions/:sessionId/phases/:phase/responses
@@ -593,6 +719,22 @@ router.post(
                   select: {
                     status: true,
                     stage: true,
+                    module: {
+                      select: {
+                        case: {
+                          select: {
+                            title: true,
+                            context: true,
+                            topic: true,
+                            stimulus: true,
+                            scientificData: true,
+                            targetConcept: true,
+                            possibleMisconceptions: true,
+                            expertAnswer: true,
+                          },
+                        },
+                      },
+                    },
                   },
                 },
                 phases: {
@@ -605,6 +747,16 @@ router.post(
                     submission: {
                       select: {
                         id: true,
+                        content: true,
+                      },
+                    },
+                    responses: {
+                      orderBy: {
+                        createdAt: "asc",
+                      },
+                      select: {
+                        answer: true,
+                        aiFeedback: true,
                       },
                     },
                   },
@@ -687,13 +839,39 @@ router.post(
           }
 
           // ==========================================
-          // ORDINARY RESPONSE
+          // ORDINARY RESPONSE / SOCRATIC AI CHAT
           // ==========================================
 
           if (!responseData) {
             throw new Error(
               "Validated response data missing"
             );
+          }
+
+          let aiFeedback: string | null = null;
+          let aiMetadata: Prisma.InputJsonObject | null = null;
+
+          try {
+            const tutorResult =
+              await AITutorService.generateSocraticChatResponse({
+                caseStudy: session.assignment.module.case,
+                phaseNumber,
+                chatHistory: phase.responses,
+                studentMessage: responseData.answer,
+                previousSubmissionContent:
+                  phase.submission?.content,
+              });
+
+            aiFeedback = tutorResult.aiResponse;
+            aiMetadata =
+              tutorResult.metadata as unknown as Prisma.InputJsonObject;
+          } catch (tutorError) {
+            console.error(
+              "AI Tutor response generation failed:",
+              tutorError
+            );
+            aiFeedback =
+              "Jawabanmu berhasil disimpan. Silakan lanjutkan meninjau data atau ajukan pertanyaan bila ada yang ingin kamu diskusikan.";
           }
 
           const response =
@@ -703,11 +881,15 @@ router.post(
                 answer: responseData.answer,
                 question:
                   responseData.question ?? null,
+                aiFeedback,
+                aiMetadata: aiMetadata ?? Prisma.JsonNull,
               },
               select: {
                 id: true,
                 answer: true,
                 question: true,
+                aiFeedback: true,
+                aiMetadata: true,
                 createdAt: true,
               },
             });
@@ -719,8 +901,8 @@ router.post(
           };
         },
         {
-          maxWait: 5000,
-          timeout: 10000,
+          maxWait: 10000,
+          timeout: 30000,
         }
       );
 
@@ -1233,5 +1415,292 @@ router.post(
       }
     }
   );
+
+// ==========================================
+// GET /api/student/learning-history
+// Retrieve student learning history for completed and active modules
+// ==========================================
+
+router.get(
+  "/learning-history",
+  requireAuth,
+  requireRole("STUDENT"),
+  async (_req, res) => {
+    const studentId = res.locals.user?.id;
+
+    if (!studentId) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
+
+    try {
+      const assignments = await prisma.studentModuleAssignment.findMany({
+        where: {
+          studentId,
+        },
+        orderBy: [
+          { assignedAt: "desc" },
+          { id: "asc" },
+        ],
+        select: {
+          id: true,
+          moduleId: true,
+          context: true,
+          status: true,
+          stage: true,
+          assignedAt: true,
+          completedAt: true,
+          module: {
+            select: {
+              id: true,
+              title: true,
+              description: true,
+              topic: true,
+              case: {
+                select: {
+                  id: true,
+                  title: true,
+                  context: true,
+                  topic: true,
+                },
+              },
+            },
+          },
+          learningSession: {
+            select: {
+              id: true,
+              status: true,
+              currentPhase: true,
+              startedAt: true,
+              completedAt: true,
+              phases: {
+                orderBy: {
+                  phaseNumber: "asc",
+                },
+                select: {
+                  id: true,
+                  phaseNumber: true,
+                  status: true,
+                  startedAt: true,
+                  completedAt: true,
+                  responses: {
+                    orderBy: {
+                      createdAt: "asc",
+                    },
+                    select: {
+                      id: true,
+                      answer: true,
+                      question: true,
+                      aiFeedback: true,
+                      aiMetadata: true,
+                      createdAt: true,
+                    },
+                  },
+                  submission: {
+                    select: {
+                      id: true,
+                      content: true,
+                      submittedAt: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const moduleIds = assignments.map((assignment) => assignment.moduleId);
+
+      const attempts =
+        moduleIds.length > 0
+          ? await prisma.assessmentAttempt.findMany({
+              where: {
+                studentId,
+                assessment: {
+                  moduleId: {
+                    in: moduleIds,
+                  },
+                },
+              },
+              select: {
+                id: true,
+                status: true,
+                startedAt: true,
+                submittedAt: true,
+                gradedAt: true,
+                assessment: {
+                  select: {
+                    id: true,
+                    title: true,
+                    type: true,
+                    moduleId: true,
+                  },
+                },
+                answers: {
+                  select: {
+                    id: true,
+                    questionId: true,
+                    answer: true,
+                    score: true,
+                    feedback: true,
+                  },
+                },
+              },
+            })
+          : [];
+
+      const history = assignments.map((assignment) => {
+        const assignmentAttempts = attempts.filter(
+          (attempt) => attempt.assessment.moduleId === assignment.moduleId
+        );
+
+        const attemptsByType = new Map(
+          assignmentAttempts.map((attempt) => [
+            attempt.assessment.type,
+            attempt,
+          ])
+        );
+
+        const preTestAttempt = attemptsByType.get("PRE_TEST") ?? null;
+        const postTestAttempt = attemptsByType.get("POST_TEST") ?? null;
+
+        const phaseMap = new Map(
+          (assignment.learningSession?.phases ?? []).map((phase) => [
+            phase.phaseNumber,
+            phase,
+          ])
+        );
+
+        const getPhaseResponse = (phaseNumber: number) => {
+          const phase = phaseMap.get(phaseNumber);
+
+          if (!phase || phase.status === "LOCKED") {
+            return null;
+          }
+
+          const responses = phase.responses ?? [];
+
+          if (phaseNumber === 1) {
+            const firstResponse = responses[0];
+
+            if (!firstResponse) {
+              return null;
+            }
+
+            return {
+              answer: firstResponse.answer ?? null,
+              confidence:
+                firstResponse.aiMetadata &&
+                typeof firstResponse.aiMetadata === "object" &&
+                "confidence" in firstResponse.aiMetadata
+                  ? (firstResponse.aiMetadata.confidence as string | null)
+                  : null,
+            };
+          }
+
+          if (phaseNumber === 4 && phase.submission) {
+            const content = phase.submission.content;
+
+            if (!content || typeof content !== "object") {
+              return null;
+            }
+
+            return {
+              claim: "claim" in content ? String(content.claim ?? "") : null,
+              evidence: "evidence" in content ? String(content.evidence ?? "") : null,
+              reasoning: "reasoning" in content ? String(content.reasoning ?? "") : null,
+            };
+          }
+
+          if (phaseNumber === 5 && phase.submission) {
+            const content = phase.submission.content;
+
+            if (!content || typeof content !== "object") {
+              return null;
+            }
+
+            return {
+              understanding:
+                "understandingChange" in content
+                  ? String(content.understandingChange ?? "")
+                  : null,
+              evidence:
+                "influentialEvidence" in content
+                  ? String(content.influentialEvidence ?? "")
+                  : null,
+            };
+          }
+
+          return responses[0]?.answer ?? null;
+        };
+
+        const getAttemptPayload = (
+          attempt: (typeof preTestAttempt) | null
+        ) => {
+          if (!attempt) {
+            return null;
+          }
+
+          return {
+            type:
+              attempt.assessment.type === "PRE_TEST"
+                ? "pre-test"
+                : "post-test",
+            context: assignment.context,
+            answers: attempt.answers.map((answer) => ({
+              questionId: answer.questionId,
+              answer: answer.answer,
+            })),
+            submittedAt:
+              attempt.submittedAt ?? attempt.startedAt ?? new Date().toISOString(),
+            attemptId: attempt.id,
+          };
+        };
+
+        return {
+          id: assignment.id,
+          context: assignment.context,
+          caseStudy: {
+            id: assignment.module.case?.id ?? assignment.module.id,
+            title: assignment.module.case?.title ?? assignment.module.title,
+            context: assignment.module.case?.context ?? assignment.context,
+            topic: assignment.module.case?.topic ?? assignment.module.topic,
+            description: assignment.module.description ?? null,
+          },
+          status:
+            assignment.status === "COMPLETED" || assignment.stage === "COMPLETED"
+              ? "COMPLETED"
+              : "IN_PROGRESS",
+          startedAt: assignment.assignedAt,
+          completedAt: assignment.completedAt,
+          preTest: getAttemptPayload(preTestAttempt),
+          postTest: getAttemptPayload(postTestAttempt),
+          phaseOneResponse: getPhaseResponse(1),
+          phaseTwoResponse: getPhaseResponse(2),
+          phaseThreeResponse: getPhaseResponse(3),
+          phaseFourResponse: getPhaseResponse(4),
+          phaseFiveResponse: getPhaseResponse(5),
+        };
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Student learning history retrieved successfully",
+        data: history,
+      });
+    } catch (error) {
+      console.error("Failed to retrieve learning history:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve learning history",
+      });
+    }
+  }
+);
 
 export default router;

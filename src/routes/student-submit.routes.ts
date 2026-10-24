@@ -4,7 +4,9 @@ import { prisma } from "../lib/prisma";
 import { requireAuth } from "../middlewares/auth.middleware";
 import { requireRole } from "../middlewares/role.middleware";
 
+import { Prisma } from "../generated/prisma/client";
 import { attemptIdSchema } from "../validators/assessment-answer.validator";
+import { AIEvaluationService } from "../services/ai-evaluation.service";
 
 const router = Router();
 
@@ -140,6 +142,18 @@ router.post(
                     module: {
                       select: {
                         status: true,
+                        case: {
+                          select: {
+                            id: true,
+                            title: true,
+                            context: true,
+                            topic: true,
+                            stimulus: true,
+                            scientificData: true,
+                            targetConcept: true,
+                            expertAnswer: true,
+                          },
+                        },
                       },
                     },
                   },
@@ -339,7 +353,260 @@ router.post(
           }
 
           // ==========================================
-          // 15. Submit assessment attempt
+          // 14b. Automatically grade Essay questions with AI
+          // ==========================================
+
+          const essayQuestions =
+            await tx.assessmentQuestion.findMany({
+              where: {
+                moduleId: attempt.assessment.moduleId,
+                type: "ESSAY",
+              },
+              select: {
+                id: true,
+                questionText: true,
+                rubric: true,
+                maxScore: true,
+                indicator: true,
+              },
+            });
+
+          const essayAnswers =
+            await tx.assessmentAnswer.findMany({
+              where: {
+                attemptId,
+                questionId: {
+                  in: essayQuestions.map((q) => q.id),
+                },
+              },
+              select: {
+                id: true,
+                questionId: true,
+                answer: true,
+              },
+            });
+
+          const caseContext = {
+            title: attempt.assessment.module.case.title,
+            context: attempt.assessment.module.case.context,
+            topic: attempt.assessment.module.case.topic,
+            stimulus: attempt.assessment.module.case.stimulus,
+            scientificData: attempt.assessment.module.case.scientificData,
+            targetConcept: attempt.assessment.module.case.targetConcept,
+            expertAnswer: attempt.assessment.module.case.expertAnswer,
+          };
+
+          let essayTotalScore = 0;
+          let essayMaxScore = 0;
+          const essayGradingResults = [];
+
+          for (const question of essayQuestions) {
+            const studentAnswer = essayAnswers.find(
+              (ans) => ans.questionId === question.id
+            );
+
+            if (!studentAnswer) {
+              throw new Error("INCOMPLETE_ANSWERS");
+            }
+
+            const graded =
+              await AIEvaluationService.gradeEssayAnswer({
+                questionText: question.questionText,
+                rubric: question.rubric,
+                maxScore: question.maxScore,
+                indicator: question.indicator,
+                studentAnswer: studentAnswer.answer,
+                caseStudy: caseContext,
+              });
+
+            await tx.assessmentAnswer.update({
+              where: {
+                id: studentAnswer.id,
+              },
+              data: {
+                score: graded.score,
+                feedback: graded.feedback,
+                gradedAt: new Date(),
+              },
+            });
+
+            essayTotalScore += graded.score;
+            essayMaxScore += question.maxScore;
+            essayGradingResults.push({
+              questionId: question.id,
+              score: graded.score,
+              maxScore: question.maxScore,
+              feedback: graded.feedback,
+            });
+          }
+
+          // ==========================================
+          // 14c. If Post-Test: Grade pending Pre-Test essays & evaluate Phases 1-5
+          // ==========================================
+
+          const isPostTest =
+            assessmentType === "POST_TEST";
+
+          let phaseEvaluationResult = null;
+
+          if (isPostTest) {
+            // Ensure pre-test essay questions are also fully graded
+            const preTestAttempt =
+              await tx.assessmentAttempt.findFirst({
+                where: {
+                  studentId,
+                  assessment: {
+                    moduleId: attempt.assessment.moduleId,
+                    type: "PRE_TEST",
+                  },
+                },
+                include: {
+                  answers: {
+                    include: {
+                      question: true,
+                    },
+                  },
+                },
+              });
+
+            if (preTestAttempt) {
+              let preUpdated = false;
+              for (const preAns of preTestAttempt.answers) {
+                if (
+                  preAns.question.type === "ESSAY" &&
+                  preAns.score === null
+                ) {
+                  const gradedPre =
+                    await AIEvaluationService.gradeEssayAnswer({
+                      questionText: preAns.question.questionText,
+                      rubric: preAns.question.rubric,
+                      maxScore: preAns.question.maxScore,
+                      indicator: preAns.question.indicator,
+                      studentAnswer: preAns.answer,
+                      caseStudy: caseContext,
+                    });
+
+                  await tx.assessmentAnswer.update({
+                    where: { id: preAns.id },
+                    data: {
+                      score: gradedPre.score,
+                      feedback: gradedPre.feedback,
+                      gradedAt: new Date(),
+                    },
+                  });
+                  preUpdated = true;
+                }
+              }
+
+              if (preUpdated || preTestAttempt.status !== "GRADED") {
+                await tx.assessmentAttempt.update({
+                  where: { id: preTestAttempt.id },
+                  data: {
+                    status: "GRADED",
+                    gradedAt: new Date(),
+                  },
+                });
+              }
+            }
+
+            // Evaluate 5 learning phases
+            const session =
+              await tx.learningSession.findUnique({
+                where: {
+                  assignmentId: assignment.id,
+                },
+                include: {
+                  phases: {
+                    orderBy: {
+                      phaseNumber: "asc",
+                    },
+                    include: {
+                      responses: {
+                        orderBy: {
+                          createdAt: "asc",
+                        },
+                      },
+                      submission: true,
+                    },
+                  },
+                },
+              });
+
+            if (session) {
+              const p1 = session.phases.find(
+                (p) => p.phaseNumber === 1
+              );
+              const p2 = session.phases.find(
+                (p) => p.phaseNumber === 2
+              );
+              const p3 = session.phases.find(
+                (p) => p.phaseNumber === 3
+              );
+              const p4 = session.phases.find(
+                (p) => p.phaseNumber === 4
+              );
+              const p5 = session.phases.find(
+                (p) => p.phaseNumber === 5
+              );
+
+              const p1Content = p1?.submission
+                ?.content as Record<string, unknown> | null;
+              const p4Content = p4?.submission
+                ?.content as Record<string, unknown> | null;
+              const p5Content = p5?.submission
+                ?.content as Record<string, unknown> | null;
+
+              phaseEvaluationResult =
+                await AIEvaluationService.evaluateLearningPhases({
+                  caseStudy: caseContext,
+                  phase1: p1Content
+                    ? {
+                        prediction:
+                          typeof p1Content.prediction === "string"
+                            ? p1Content.prediction
+                            : null,
+                        reasoning:
+                          typeof p1Content.reasoning === "string"
+                            ? p1Content.reasoning
+                            : null,
+                        confidence:
+                          typeof p1Content.confidence === "string"
+                            ? p1Content.confidence
+                            : null,
+                      }
+                    : p1?.responses[0]
+                      ? { prediction: p1.responses[0].answer }
+                      : null,
+                  phase2Responses: p2?.responses.map((r) => ({
+                    answer: r.answer,
+                    aiFeedback: r.aiFeedback,
+                  })),
+                  phase3Responses: p3?.responses.map((r) => ({
+                    answer: r.answer,
+                    aiFeedback: r.aiFeedback,
+                  })),
+                  phase4Submission: p4Content as any,
+                  phase5Submission: p5Content as any,
+                });
+
+              // Store phase evaluation into Phase 5 submission content
+              if (p5?.submission) {
+                await tx.learningPhaseSubmission.update({
+                  where: { id: p5.submission.id },
+                  data: {
+                    content: {
+                      ...(p5Content || {}),
+                      aiEvaluation:
+                        phaseEvaluationResult as unknown as Prisma.InputJsonValue,
+                    } as Prisma.InputJsonObject,
+                  },
+                });
+              }
+            }
+          }
+
+          // ==========================================
+          // 15. Submit and finalize assessment attempt
           // ==========================================
 
           const submittedAt = new Date();
@@ -350,8 +617,9 @@ router.post(
                 id: attemptId,
               },
               data: {
-                status: "PENDING_GRADING",
+                status: "GRADED",
                 submittedAt,
+                gradedAt: submittedAt,
               },
               select: {
                 id: true,
@@ -359,15 +627,13 @@ router.post(
                 status: true,
                 startedAt: true,
                 submittedAt: true,
+                gradedAt: true,
               },
             });
 
           // ==========================================
           // 16. Advance module assignment
           // ==========================================
-
-          const isPostTest =
-            assessmentType === "POST_TEST";
 
           const updatedAssignment =
             await tx.studentModuleAssignment.update({
@@ -392,6 +658,15 @@ router.post(
               },
             });
 
+          // Total score for this attempt
+          const totalScore =
+            Math.round((mcqTotalScore + essayTotalScore) * 100) / 100;
+          const maxScore = mcqMaxScore + essayMaxScore;
+          const percentage =
+            maxScore > 0
+              ? Math.round((totalScore / maxScore) * 10000) / 100
+              : 0;
+
           // ==========================================
           // 17. Return transaction result
           // ==========================================
@@ -401,18 +676,36 @@ router.post(
             assessmentType,
             totalQuestions,
             answeredQuestions,
+            totalScore,
+            maxScore,
+            percentage,
             mcqGrading: {
               totalQuestions: mcqQuestions.length,
               correctAnswers: mcqCorrectCount,
               score: mcqTotalScore,
               maxScore: mcqMaxScore,
+              percentage:
+                mcqMaxScore > 0
+                  ? Math.round((mcqTotalScore / mcqMaxScore) * 10000) / 100
+                  : 0,
             },
+            essayGrading: {
+              totalQuestions: essayQuestions.length,
+              score: essayTotalScore,
+              maxScore: essayMaxScore,
+              percentage:
+                essayMaxScore > 0
+                  ? Math.round((essayTotalScore / essayMaxScore) * 10000) / 100
+                  : 0,
+              results: essayGradingResults,
+            },
+            phaseEvaluation: phaseEvaluationResult,
             moduleAssignment: updatedAssignment,
           };
         },
         {
-          maxWait: 5000,
-          timeout: 10000,
+          maxWait: 15000,
+          timeout: 45000,
         }
       );
 

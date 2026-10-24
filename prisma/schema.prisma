@@ -461,3 +461,31 @@ model LearningPhaseSubmission {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// ==========================================
+// AI PROMPT CONFIGURATION
+// ==========================================
+
+model AIPromptConfig {
+  id                  String   @id @default(uuid()) @db.Uuid
+  name                String   @unique
+  version             Int      @default(1)
+  isActive            Boolean  @default(true)
+
+  // Customizable prompt components
+  role                String   @db.Text
+  objective           String   @db.Text
+  caseCharacteristics String   @db.Text
+  guidanceStrategy    Json
+
+  // Model parameters
+  model               String   @default("gpt-4o")
+  temperature         Float    @default(0.3)
+  maxTokens           Int      @default(1000)
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([isActive])
+}
+

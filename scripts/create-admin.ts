@@ -5,6 +5,15 @@ import { z } from "zod";
 
 import { prisma } from "../src/lib/prisma";
 
+// ==========================================
+// ADMIN SEEDER
+// Usage:
+//   npx tsx scripts/create-admin.ts
+//
+// Requires in .env:
+//   ADMIN_NAME, ADMIN_EMAIL, ADMIN_PASSWORD (min 12 chars)
+// ==========================================
+
 const adminSchema = z.object({
   ADMIN_NAME: z.string().trim().min(2),
   ADMIN_EMAIL: z.email().transform((email) =>

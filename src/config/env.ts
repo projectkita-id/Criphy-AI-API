@@ -15,6 +15,10 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.literal("1h").default("1h"),
 
   CLIENT_URL: z.url(),
+
+  OPENAI_API_KEY: z.string().optional(),
+
+  OPENAI_MODEL: z.string().default("gpt-4o"),
 });
 
 const parsed = envSchema.safeParse(process.env);
