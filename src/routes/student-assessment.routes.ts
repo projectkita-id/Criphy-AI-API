@@ -10,6 +10,19 @@ import { assessmentIdSchema } from "../validators/assessment.validator";
 
 const router = Router();
 
+const attemptSelect = {
+  id: true,
+  assessmentId: true,
+  status: true,
+  startedAt: true,
+  answers: {
+    select: {
+      questionId: true,
+      answer: true,
+    },
+  },
+} as const;
+
 // ==========================================
 // GET /api/student/modules/:moduleId/assessments
 // List published assessments (STUDENT only)
@@ -190,7 +203,7 @@ router.get(
        if (!assessment) {
          res.status(404).json({
            success: false,
-           message: "Available assessment not found",
+           message: "Asesmen tidak ditemukan atau belum dipublikasikan.",
          });
          return;
        }
@@ -201,6 +214,7 @@ router.get(
            where: {
              studentId,
              status: "ACTIVE",
+             moduleId: assessment.moduleId,
            },
            select: {
              moduleId: true,
@@ -212,7 +226,7 @@ router.get(
          res.status(403).json({
            success: false,
            message:
-             "You do not have an active module assignment",
+             "Modul untuk asesmen ini belum aktif. Pilih kembali konteks pembelajaranmu.",
          });
          return;
        }
@@ -222,7 +236,7 @@ router.get(
          res.status(403).json({
            success: false,
            message:
-             "This assessment does not belong to your assigned learning module",
+             "Asesmen ini bukan bagian dari modul yang sedang kamu kerjakan.",
          });
          return;
        }
@@ -237,7 +251,7 @@ router.get(
          res.status(409).json({
            success: false,
            message:
-             `This ${assessment.type.toLowerCase().replace("_", "-")} is not available at your current learning stage`,
+             "Asesmen ini belum bisa dikerjakan pada tahap belajarmu saat ini.",
          });
          return;
        }
@@ -335,6 +349,10 @@ router.post(
             FROM "StudentModuleAssignment"
             WHERE "studentId" = ${studentId}::uuid
               AND "status" = 'ACTIVE'
+              AND "moduleId" = (
+                SELECT "moduleId" FROM "Assessment"
+                WHERE id = ${assessmentId}::uuid
+              )
             FOR UPDATE
           `;
 
@@ -351,8 +369,7 @@ router.post(
           const assignment =
             await tx.studentModuleAssignment.findFirst({
               where: {
-                studentId,
-                status: "ACTIVE",
+                id: lockedAssignments[0].id,
               },
               select: {
                 id: true,
@@ -469,14 +486,22 @@ router.post(
                   studentId,
                 },
               },
-              select: {
-                id: true,
-              },
+              select: attemptSelect,
             });
 
+          // Resume an unfinished attempt instead of failing,
+          // so reloading the page keeps saved answers.
           if (existingAttempt) {
+            if (existingAttempt.status !== "IN_PROGRESS") {
+              return {
+                error: "ALREADY_SUBMITTED" as const,
+              };
+            }
+
             return {
-              error: "ALREADY_STARTED" as const,
+              created: false as const,
+              attempt: existingAttempt,
+              assessmentType: assessment.type,
             };
           }
 
@@ -491,12 +516,7 @@ router.post(
                 studentId,
                 status: "IN_PROGRESS",
               },
-              select: {
-                id: true,
-                assessmentId: true,
-                status: true,
-                startedAt: true,
-              },
+              select: attemptSelect,
             });
 
           return {
@@ -520,31 +540,31 @@ router.post(
           NO_ACTIVE_ASSIGNMENT: {
             status: 403,
             message:
-              "You must have an active module assignment before starting an assessment",
+              "Modul untuk asesmen ini belum aktif. Pilih kembali konteks pembelajaranmu.",
           },
           ASSESSMENT_NOT_FOUND: {
             status: 404,
-            message: "Available assessment not found",
+            message: "Asesmen tidak ditemukan atau belum dipublikasikan.",
           },
           WRONG_MODULE: {
             status: 403,
             message:
-              "This assessment does not belong to your assigned learning module",
+              "Asesmen ini bukan bagian dari modul yang sedang kamu kerjakan.",
           },
           INVALID_STAGE: {
             status: 409,
             message:
-              "This assessment is not available at your current learning stage",
+              "Asesmen ini belum bisa dikerjakan pada tahap belajarmu saat ini.",
           },
           LEARNING_NOT_COMPLETED: {
             status: 409,
             message:
-              "You must complete all five learning phases before starting the post-test",
+              "Selesaikan kelima fase pembelajaran terlebih dahulu sebelum post-test.",
           },
-          ALREADY_STARTED: {
+          ALREADY_SUBMITTED: {
             status: 409,
             message:
-              "You have already started this assessment",
+              "Asesmen ini sudah kamu kumpulkan sebelumnya.",
           },
         };
 
@@ -561,7 +581,7 @@ router.post(
       // 11. Return created attempt
       // ==========================================
 
-      res.status(201).json({
+      res.status(result.created ? 201 : 200).json({
         success: true,
         message:
           result.assessmentType === "PRE_TEST"
@@ -571,14 +591,30 @@ router.post(
       });
     } catch (error) {
       // Handle simultaneous duplicate requests
+      // Two simultaneous requests: return the attempt the other one created.
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === "P2002"
       ) {
+        const attempt = await prisma.assessmentAttempt.findUnique({
+          where: {
+            assessmentId_studentId: { assessmentId, studentId },
+          },
+          select: attemptSelect,
+        });
+
+        if (attempt && attempt.status === "IN_PROGRESS") {
+          res.status(200).json({
+            success: true,
+            message: "Assessment attempt resumed",
+            data: attempt,
+          });
+          return;
+        }
+
         res.status(409).json({
           success: false,
-          message:
-            "You have already started this assessment",
+          message: "Asesmen ini sudah kamu kumpulkan sebelumnya.",
         });
         return;
       }

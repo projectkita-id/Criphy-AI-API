@@ -7,6 +7,7 @@ import { requireRole } from "../middlewares/role.middleware";
 
 import {
   learningPhaseParamsSchema,
+  learningSessionParamsSchema,
   savePhaseResponseSchema,
 } from "../validators/student-learning-session.validator";
 
@@ -16,6 +17,9 @@ import {
 } from "../validators/learning-phase-submission.validator";
 
 import { AITutorService } from "../services/ai-tutor.service";
+import { generatePhaseContent } from "../services/ai-content.service";
+import { buildLearningHistory } from "../services/learning-history.service";
+import { readLearningContext } from "../utils/learning-context";
 
 const router = Router();
 
@@ -28,7 +32,13 @@ router.post(
   "/learning-sessions",
   requireAuth,
   requireRole("STUDENT"),
-  async (_req, res) => {
+  async (req, res) => {
+    // Students may be active in several contexts; the client says which one.
+    const context = readLearningContext(req.body?.context);
+    const contextFilter = context
+      ? Prisma.sql`AND "context" = ${context}::"LearningContext"`
+      : Prisma.empty;
+
     const studentId: string | undefined =
       res.locals.user?.id;
 
@@ -51,6 +61,9 @@ router.post(
             FROM "StudentModuleAssignment"
             WHERE "studentId" = ${studentId}::uuid
               AND "status" = 'ACTIVE'
+              ${contextFilter}
+            ORDER BY "assignedAt" DESC
+            LIMIT 1
             FOR UPDATE
           `;
 
@@ -62,8 +75,7 @@ router.post(
           const assignment =
             await tx.studentModuleAssignment.findFirst({
               where: {
-                studentId,
-                status: "ACTIVE",
+                id: lockedAssignments[0].id,
               },
               select: {
                 id: true,
@@ -213,17 +225,17 @@ router.post(
         NO_ACTIVE_ASSIGNMENT: {
           status: 403,
           message:
-            "You do not have an active module assignment",
+            "Belum ada modul aktif untuk konteks ini. Pilih konteks pembelajaran terlebih dahulu.",
         },
         INVALID_STAGE: {
           status: 409,
           message:
-            "Your module assignment is not at the learning stage",
+            "Kamu belum berada di tahap pembelajaran untuk modul ini.",
         },
         PRE_TEST_NOT_SUBMITTED: {
           status: 409,
           message:
-            "You must submit your pre-test before starting the learning session",
+            "Kerjakan dan kumpulkan pre-test terlebih dahulu sebelum mulai belajar.",
         },
       };
 
@@ -258,7 +270,7 @@ router.post(
 
       res.status(500).json({
         success: false,
-        message: "Failed to start learning session",
+        message: "Gagal memulai sesi belajar. Coba lagi beberapa saat lagi.",
       });
     }
   }
@@ -273,7 +285,9 @@ router.get(
   "/learning-sessions/active",
   requireAuth,
   requireRole("STUDENT"),
-  async (_req, res) => {
+  async (req, res) => {
+    const context = readLearningContext(req.query.context);
+
     const studentId: string | undefined =
       res.locals.user?.id;
 
@@ -292,6 +306,10 @@ router.get(
           where: {
             studentId,
             status: "ACTIVE",
+            ...(context ? { context } : {}),
+          },
+          orderBy: {
+            assignedAt: "desc",
           },
           select: {
             id: true,
@@ -355,7 +373,7 @@ router.get(
         res.status(409).json({
           success: false,
           message:
-            "Your module assignment is not at the learning stage",
+            "Kamu belum berada di tahap pembelajaran untuk modul ini.",
         });
         return;
       }
@@ -431,6 +449,130 @@ router.get(
         success: false,
         message:
           "Failed to retrieve active learning session",
+      });
+    }
+  }
+);
+
+// ==========================================
+// GET /api/student/learning-sessions/:sessionId/content
+// AI-generated, case-specific content for the five phases.
+// Generated once per session and stored so every student
+// answers exactly the questions that are later graded.
+// ==========================================
+
+router.get(
+  "/learning-sessions/:sessionId/content",
+  requireAuth,
+  requireRole("STUDENT"),
+  async (req, res) => {
+    const studentId: string | undefined = res.locals.user?.id;
+
+    if (!studentId) {
+      res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+      return;
+    }
+
+    const parsedParams = learningSessionParamsSchema.safeParse(req.params);
+
+    if (!parsedParams.success) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid learning session ID",
+      });
+      return;
+    }
+
+    const { sessionId } = parsedParams.data;
+
+    try {
+      const session = await prisma.learningSession.findFirst({
+        where: {
+          id: sessionId,
+          assignment: { studentId },
+        },
+        select: {
+          id: true,
+          generatedContent: true,
+          assignment: {
+            select: {
+              module: {
+                select: {
+                  title: true,
+                  description: true,
+                  gradeLevel: true,
+                  learningObjectives: true,
+                  targetConcepts: true,
+                  case: {
+                    select: {
+                      id: true,
+                      title: true,
+                      context: true,
+                      topic: true,
+                      stimulus: true,
+                      scientificData: true,
+                      targetConcept: true,
+                      possibleMisconceptions: true,
+                      expertAnswer: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      if (!session) {
+        res.status(404).json({
+          success: false,
+          message: "Learning session not found",
+        });
+        return;
+      }
+
+      if (session.generatedContent) {
+        res.status(200).json({
+          success: true,
+          message: "Learning content retrieved",
+          data: session.generatedContent,
+        });
+        return;
+      }
+
+      const { module } = session.assignment;
+      const content = await generatePhaseContent(module.case, module);
+
+      // Only store if no concurrent request stored content first.
+      await prisma.learningSession.updateMany({
+        where: {
+          id: session.id,
+          generatedContent: { equals: Prisma.DbNull },
+        },
+        data: {
+          generatedContent: content as unknown as Prisma.InputJsonObject,
+        },
+      });
+
+      const stored = await prisma.learningSession.findUnique({
+        where: { id: session.id },
+        select: { generatedContent: true },
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Learning content generated",
+        data: stored?.generatedContent ?? content,
+      });
+    } catch (error) {
+      console.error("Failed to retrieve learning content:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to retrieve learning content",
       });
     }
   }
@@ -616,21 +758,6 @@ router.post(
       // ==========================================
       // STRUCTURED SUBMISSION VALIDATION
       // ==========================================
-
-      // Structured submissions are supported
-      // for phases 1, 4, and 5.
-      if (
-        phaseNumber !== 1 &&
-        phaseNumber !== 4 &&
-        phaseNumber !== 5
-      ) {
-        res.status(400).json({
-          success: false,
-          message:
-            "Structured submissions are currently supported only for phases 1, 4 and 5",
-        });
-        return;
-      }
 
       const parsedEnvelope =
         structuredPhaseSubmissionSchema.safeParse(
@@ -1150,43 +1277,31 @@ router.post(
             // 5. VALIDATE PHASE COMPLETION REQUIREMENTS
             // ==========================================
 
-            if (
-              phaseNumber === 1 ||
-              phaseNumber === 4 ||
-              phaseNumber === 5
-            ) {
-              // Phases 1, 4 and 5 require
-              // a structured submission.
-              const submission =
-                await tx.learningPhaseSubmission.findUnique({
-                  where: {
-                    phaseProgressId: currentPhase.id,
-                  },
-                  select: {
-                    id: true,
-                  },
-                });
+            // Every phase requires a structured submission
+            // (phases 2 and 3 also accept tutor chat responses).
+            const [submission, responseCount] = await Promise.all([
+              tx.learningPhaseSubmission.findUnique({
+                where: {
+                  phaseProgressId: currentPhase.id,
+                },
+                select: {
+                  id: true,
+                },
+              }),
+              tx.learningPhaseResponse.count({
+                where: {
+                  phaseProgressId: currentPhase.id,
+                },
+              }),
+            ]);
 
-              if (!submission) {
-                return {
-                  error: "NO_SUBMISSION" as const,
-                };
-              }
-            } else {
-              // Phases 2 and 3 require
-              // at least one ordinary response.
-              const responseCount =
-                await tx.learningPhaseResponse.count({
-                  where: {
-                    phaseProgressId: currentPhase.id,
-                  },
-                });
+            const acceptsChatOnly =
+              phaseNumber === 2 || phaseNumber === 3;
 
-              if (responseCount === 0) {
-                return {
-                  error: "NO_RESPONSES" as const,
-                };
-              }
+            if (!submission && !(acceptsChatOnly && responseCount > 0)) {
+              return {
+                error: "NO_SUBMISSION" as const,
+              };
             }
 
             // 6. Verify post-test before any updates
@@ -1437,260 +1552,10 @@ router.get(
     }
 
     try {
-      const assignments = await prisma.studentModuleAssignment.findMany({
-        where: {
-          studentId,
-        },
-        orderBy: [
-          { assignedAt: "desc" },
-          { id: "asc" },
-        ],
-        select: {
-          id: true,
-          moduleId: true,
-          context: true,
-          status: true,
-          stage: true,
-          assignedAt: true,
-          completedAt: true,
-          module: {
-            select: {
-              id: true,
-              title: true,
-              description: true,
-              topic: true,
-              case: {
-                select: {
-                  id: true,
-                  title: true,
-                  context: true,
-                  topic: true,
-                },
-              },
-            },
-          },
-          learningSession: {
-            select: {
-              id: true,
-              status: true,
-              currentPhase: true,
-              startedAt: true,
-              completedAt: true,
-              phases: {
-                orderBy: {
-                  phaseNumber: "asc",
-                },
-                select: {
-                  id: true,
-                  phaseNumber: true,
-                  status: true,
-                  startedAt: true,
-                  completedAt: true,
-                  responses: {
-                    orderBy: {
-                      createdAt: "asc",
-                    },
-                    select: {
-                      id: true,
-                      answer: true,
-                      question: true,
-                      aiFeedback: true,
-                      aiMetadata: true,
-                      createdAt: true,
-                    },
-                  },
-                  submission: {
-                    select: {
-                      id: true,
-                      content: true,
-                      submittedAt: true,
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      });
-
-      const moduleIds = assignments.map((assignment) => assignment.moduleId);
-
-      const attempts =
-        moduleIds.length > 0
-          ? await prisma.assessmentAttempt.findMany({
-              where: {
-                studentId,
-                assessment: {
-                  moduleId: {
-                    in: moduleIds,
-                  },
-                },
-              },
-              select: {
-                id: true,
-                status: true,
-                startedAt: true,
-                submittedAt: true,
-                gradedAt: true,
-                assessment: {
-                  select: {
-                    id: true,
-                    title: true,
-                    type: true,
-                    moduleId: true,
-                  },
-                },
-                answers: {
-                  select: {
-                    id: true,
-                    questionId: true,
-                    answer: true,
-                    score: true,
-                    feedback: true,
-                  },
-                },
-              },
-            })
-          : [];
-
-      const history = assignments.map((assignment) => {
-        const assignmentAttempts = attempts.filter(
-          (attempt) => attempt.assessment.moduleId === assignment.moduleId
-        );
-
-        const attemptsByType = new Map(
-          assignmentAttempts.map((attempt) => [
-            attempt.assessment.type,
-            attempt,
-          ])
-        );
-
-        const preTestAttempt = attemptsByType.get("PRE_TEST") ?? null;
-        const postTestAttempt = attemptsByType.get("POST_TEST") ?? null;
-
-        const phaseMap = new Map(
-          (assignment.learningSession?.phases ?? []).map((phase) => [
-            phase.phaseNumber,
-            phase,
-          ])
-        );
-
-        const getPhaseResponse = (phaseNumber: number) => {
-          const phase = phaseMap.get(phaseNumber);
-
-          if (!phase || phase.status === "LOCKED") {
-            return null;
-          }
-
-          const responses = phase.responses ?? [];
-
-          if (phaseNumber === 1) {
-            const firstResponse = responses[0];
-
-            if (!firstResponse) {
-              return null;
-            }
-
-            return {
-              answer: firstResponse.answer ?? null,
-              confidence:
-                firstResponse.aiMetadata &&
-                typeof firstResponse.aiMetadata === "object" &&
-                "confidence" in firstResponse.aiMetadata
-                  ? (firstResponse.aiMetadata.confidence as string | null)
-                  : null,
-            };
-          }
-
-          if (phaseNumber === 4 && phase.submission) {
-            const content = phase.submission.content;
-
-            if (!content || typeof content !== "object") {
-              return null;
-            }
-
-            return {
-              claim: "claim" in content ? String(content.claim ?? "") : null,
-              evidence: "evidence" in content ? String(content.evidence ?? "") : null,
-              reasoning: "reasoning" in content ? String(content.reasoning ?? "") : null,
-            };
-          }
-
-          if (phaseNumber === 5 && phase.submission) {
-            const content = phase.submission.content;
-
-            if (!content || typeof content !== "object") {
-              return null;
-            }
-
-            return {
-              understanding:
-                "understandingChange" in content
-                  ? String(content.understandingChange ?? "")
-                  : null,
-              evidence:
-                "influentialEvidence" in content
-                  ? String(content.influentialEvidence ?? "")
-                  : null,
-            };
-          }
-
-          return responses[0]?.answer ?? null;
-        };
-
-        const getAttemptPayload = (
-          attempt: (typeof preTestAttempt) | null
-        ) => {
-          if (!attempt) {
-            return null;
-          }
-
-          return {
-            type:
-              attempt.assessment.type === "PRE_TEST"
-                ? "pre-test"
-                : "post-test",
-            context: assignment.context,
-            answers: attempt.answers.map((answer) => ({
-              questionId: answer.questionId,
-              answer: answer.answer,
-            })),
-            submittedAt:
-              attempt.submittedAt ?? attempt.startedAt ?? new Date().toISOString(),
-            attemptId: attempt.id,
-          };
-        };
-
-        return {
-          id: assignment.id,
-          context: assignment.context,
-          caseStudy: {
-            id: assignment.module.case?.id ?? assignment.module.id,
-            title: assignment.module.case?.title ?? assignment.module.title,
-            context: assignment.module.case?.context ?? assignment.context,
-            topic: assignment.module.case?.topic ?? assignment.module.topic,
-            description: assignment.module.description ?? null,
-          },
-          status:
-            assignment.status === "COMPLETED" || assignment.stage === "COMPLETED"
-              ? "COMPLETED"
-              : "IN_PROGRESS",
-          startedAt: assignment.assignedAt,
-          completedAt: assignment.completedAt,
-          preTest: getAttemptPayload(preTestAttempt),
-          postTest: getAttemptPayload(postTestAttempt),
-          phaseOneResponse: getPhaseResponse(1),
-          phaseTwoResponse: getPhaseResponse(2),
-          phaseThreeResponse: getPhaseResponse(3),
-          phaseFourResponse: getPhaseResponse(4),
-          phaseFiveResponse: getPhaseResponse(5),
-        };
-      });
-
       res.status(200).json({
         success: true,
         message: "Student learning history retrieved successfully",
-        data: history,
+        data: await buildLearningHistory(studentId),
       });
     } catch (error) {
       console.error("Failed to retrieve learning history:", error);

@@ -6,7 +6,9 @@ import { requireRole } from "../middlewares/role.middleware";
 
 import { attemptIdSchema } from "../validators/assessment-answer.validator";
 import { AIEvaluationService } from "../services/ai-evaluation.service";
+import { getOrCreatePhaseEvaluation } from "../services/learning-evaluation.helper";
 
+import { readLearningContext } from "../utils/learning-context";
 const router = Router();
 
 // ==========================================
@@ -74,6 +76,7 @@ router.get(
                       stimulus: true,
                       scientificData: true,
                       targetConcept: true,
+                      possibleMisconceptions: true,
                       expertAnswer: true,
                     },
                   },
@@ -142,6 +145,8 @@ router.get(
 
       const caseData = attempt.assessment.module.case;
       const caseContext = {
+        id: caseData?.id ?? null,
+        possibleMisconceptions: caseData?.possibleMisconceptions,
         title: caseData?.title || attempt.assessment.module.title,
         context: caseData?.context || "DAILY_LIFE",
         topic: caseData?.topic || attempt.assessment.module.topic,
@@ -370,72 +375,14 @@ router.get(
 
         // Check if learning session phases are completed
         const session = assignment?.learningSession;
-        let phaseEvaluation = null;
+        let phaseEvaluation: Awaited<ReturnType<typeof getOrCreatePhaseEvaluation>> = null;
 
         if (session && session.phases.length === 5) {
-          const p1 = session.phases.find((p) => p.phaseNumber === 1);
-          const p2 = session.phases.find((p) => p.phaseNumber === 2);
-          const p3 = session.phases.find((p) => p.phaseNumber === 3);
-          const p4 = session.phases.find((p) => p.phaseNumber === 4);
-          const p5 = session.phases.find((p) => p.phaseNumber === 5);
-
-          const p1Content = p1?.submission?.content as Record<string, unknown> | null;
-          const p4Content = p4?.submission?.content as Record<string, unknown> | null;
-          const p5Content = p5?.submission?.content as Record<string, unknown> | null;
-
-          // Check if previously evaluated
-          if (
-            p5Content &&
-            typeof p5Content === "object" &&
-            "aiEvaluation" in p5Content
-          ) {
-            phaseEvaluation = p5Content.aiEvaluation as any;
-          } else if (p5?.status === "COMPLETED" || session.status === "COMPLETED") {
-            phaseEvaluation = await AIEvaluationService.evaluateLearningPhases({
-              caseStudy: caseContext,
-              phase1: p1Content
-                ? {
-                    prediction:
-                      typeof p1Content.prediction === "string"
-                        ? p1Content.prediction
-                        : null,
-                    reasoning:
-                      typeof p1Content.reasoning === "string"
-                        ? p1Content.reasoning
-                        : null,
-                    confidence:
-                      typeof p1Content.confidence === "string"
-                        ? p1Content.confidence
-                        : null,
-                  }
-                : p1?.responses[0]
-                  ? { prediction: p1.responses[0].answer }
-                  : null,
-              phase2Responses: p2?.responses.map((r) => ({
-                answer: r.answer,
-                aiFeedback: r.aiFeedback,
-              })),
-              phase3Responses: p3?.responses.map((r) => ({
-                answer: r.answer,
-                aiFeedback: r.aiFeedback,
-              })),
-              phase4Submission: p4Content as any,
-              phase5Submission: p5Content as any,
-            });
-
-            // Persist evaluation
-            if (p5?.submission) {
-              await prisma.learningPhaseSubmission.update({
-                where: { id: p5.submission.id },
-                data: {
-                  content: {
-                    ...(p5Content || {}),
-                    aiEvaluation: phaseEvaluation as any,
-                  },
-                },
-              });
-            }
-          }
+          phaseEvaluation = await getOrCreatePhaseEvaluation(
+            prisma,
+            session.phases,
+            caseContext
+          );
         }
 
         if (preSummary && postSummary && phaseEvaluation) {
@@ -524,8 +471,9 @@ router.get(
   "/learning-results/latest",
   requireAuth,
   requireRole("STUDENT"),
-  async (_req, res) => {
+  async (req, res) => {
     const studentId: string | undefined = res.locals.user?.id;
+    const context = readLearningContext(req.query.context);
 
     if (!studentId) {
       res.status(401).json({
@@ -536,9 +484,13 @@ router.get(
     }
 
     try {
+      // Newest completed module first (optionally within one context).
       const assignment = await prisma.studentModuleAssignment.findFirst({
-        where: { studentId },
-        orderBy: [{ completedAt: "desc" }, { updatedAt: "desc" }],
+        where: { studentId, ...(context ? { context } : {}) },
+        orderBy: [
+          { completedAt: { sort: "desc", nulls: "last" } },
+          { updatedAt: "desc" },
+        ],
         include: {
           module: {
             include: {
@@ -592,6 +544,8 @@ router.get(
 
       const caseData = assignment.module.case;
       const caseContext = {
+        id: caseData?.id ?? null,
+        possibleMisconceptions: caseData?.possibleMisconceptions,
         title: caseData?.title || assignment.module.title,
         context: caseData?.context || assignment.context,
         topic: caseData?.topic || assignment.module.topic,
@@ -603,7 +557,10 @@ router.get(
 
       // Helper to compute / grade an attempt
       const processAttempt = async (att: typeof preAttempt) => {
-        if (!att) return null;
+        // Unsubmitted attempts are never graded or shown as results.
+        if (!att || !att.submittedAt || att.status === "IN_PROGRESS") return null;
+
+        att.answers.sort((a, b) => a.question.order - b.question.order);
 
         for (const ans of att.answers) {
           if (ans.question.type === "ESSAY" && ans.score === null) {
@@ -657,6 +614,9 @@ router.get(
           questions: att.answers.map((a) => ({
             id: a.question.id,
             type: a.question.type,
+            order: a.question.order,
+            options: a.question.options,
+            correctAnswer: a.question.type === "MCQ" ? a.question.correctAnswer : null,
             questionText: a.question.questionText,
             maxScore: a.question.maxScore,
             rubric: a.question.rubric,
@@ -678,71 +638,15 @@ router.get(
       const postProcessed = await processAttempt(postAttempt);
 
       // Phase evaluation
-      let phaseEvaluation = null;
+      let phaseEvaluation: Awaited<ReturnType<typeof getOrCreatePhaseEvaluation>> = null;
       const session = assignment.learningSession;
 
       if (session && session.phases.length === 5) {
-        const p1 = session.phases.find((p) => p.phaseNumber === 1);
-        const p2 = session.phases.find((p) => p.phaseNumber === 2);
-        const p3 = session.phases.find((p) => p.phaseNumber === 3);
-        const p4 = session.phases.find((p) => p.phaseNumber === 4);
-        const p5 = session.phases.find((p) => p.phaseNumber === 5);
-
-        const p1Content = p1?.submission?.content as Record<string, unknown> | null;
-        const p4Content = p4?.submission?.content as Record<string, unknown> | null;
-        const p5Content = p5?.submission?.content as Record<string, unknown> | null;
-
-        if (
-          p5Content &&
-          typeof p5Content === "object" &&
-          "aiEvaluation" in p5Content
-        ) {
-          phaseEvaluation = p5Content.aiEvaluation as any;
-        } else {
-          phaseEvaluation = await AIEvaluationService.evaluateLearningPhases({
-            caseStudy: caseContext,
-            phase1: p1Content
-              ? {
-                  prediction:
-                    typeof p1Content.prediction === "string"
-                      ? p1Content.prediction
-                      : null,
-                  reasoning:
-                    typeof p1Content.reasoning === "string"
-                      ? p1Content.reasoning
-                      : null,
-                  confidence:
-                    typeof p1Content.confidence === "string"
-                      ? p1Content.confidence
-                      : null,
-                }
-              : p1?.responses[0]
-                ? { prediction: p1.responses[0].answer }
-                : null,
-            phase2Responses: p2?.responses.map((r) => ({
-              answer: r.answer,
-              aiFeedback: r.aiFeedback,
-            })),
-            phase3Responses: p3?.responses.map((r) => ({
-              answer: r.answer,
-              aiFeedback: r.aiFeedback,
-            })),
-            phase4Submission: p4Content as any,
-            phase5Submission: p5Content as any,
-          });
-
-          if (p5?.submission) {
-            await prisma.learningPhaseSubmission.update({
-              where: { id: p5.submission.id },
-              data: {
-                content: {
-                  ...(p5Content || {}),
-                  aiEvaluation: phaseEvaluation as any,
-                },
-              },
-            });
-          }
-        }
+        phaseEvaluation = await getOrCreatePhaseEvaluation(
+          prisma,
+          session.phases,
+          caseContext
+        );
       }
 
       let progression = null;

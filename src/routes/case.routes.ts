@@ -5,6 +5,10 @@ import { prisma } from "../lib/prisma";
 import { requireAuth } from "../middlewares/auth.middleware";
 import { requireRole } from "../middlewares/role.middleware";
 import { Prisma } from "../generated/prisma/client";
+import {
+  ProvisioningError,
+  provisionModuleForCase,
+} from "../services/module-provisioning.service";
 
 import {
   createCaseSchema,
@@ -56,11 +60,35 @@ router.get(
             context: true,
             topic: true,
             stimulus: true,
+            scientificData: true,
+            targetConcept: true,
+            possibleMisconceptions: true,
+            expertAnswer: true,
+            caseGroupId: true,
             version: true,
             validationStatus: true,
+            rejectionReason: true,
             validatedAt: true,
             createdAt: true,
             updatedAt: true,
+            learningModules: {
+              select: {
+                id: true,
+                title: true,
+                status: true,
+                _count: {
+                  select: {
+                    assessmentQuestions: true,
+                    studentAssignments: true,
+                  },
+                },
+              },
+            },
+            _count: {
+              select: {
+                materials: true,
+              },
+            },
           },
           orderBy: [
             { createdAt: "desc" },
@@ -354,7 +382,10 @@ router.patch(
 );
 
 // DELETE /api/cases/:id
-// Delete the latest draft or rejected case version
+// Delete a case study version together with the learning modules,
+// assessments and questions generated from it. Refused once any
+// student has been assigned to (or attempted) one of those modules,
+// so student learning history is never lost.
 router.delete(
   "/:id",
   requireAuth,
@@ -373,68 +404,88 @@ router.delete(
     const id = parsedId.data;
 
     try {
-      const caseStudy = await prisma.validatedCase.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          caseGroupId: true,
-          version: true,
-          validationStatus: true,
+      const result = await prisma.$transaction(
+        async (tx) => {
+          const caseStudy = await tx.validatedCase.findUnique({
+            where: { id },
+            select: {
+              id: true,
+              caseGroupId: true,
+              version: true,
+              learningModules: {
+                select: {
+                  id: true,
+                  title: true,
+                  _count: {
+                    select: { studentAssignments: true },
+                  },
+                },
+              },
+            },
+          });
+
+          if (!caseStudy) {
+            return { error: "NOT_FOUND" as const };
+          }
+
+          const moduleIds = caseStudy.learningModules.map((module) => module.id);
+
+          const assignedStudents = caseStudy.learningModules.reduce(
+            (total, module) => total + module._count.studentAssignments,
+            0
+          );
+
+          const attemptCount =
+            moduleIds.length > 0
+              ? await tx.assessmentAttempt.count({
+                  where: { assessment: { moduleId: { in: moduleIds } } },
+                })
+              : 0;
+
+          if (assignedStudents > 0 || attemptCount > 0) {
+            return {
+              error: "IN_USE" as const,
+              assignedStudents,
+            };
+          }
+
+          if (moduleIds.length > 0) {
+            await tx.assessmentQuestion.deleteMany({
+              where: { moduleId: { in: moduleIds } },
+            });
+            await tx.assessment.deleteMany({
+              where: { moduleId: { in: moduleIds } },
+            });
+            await tx.learningModule.deleteMany({
+              where: { id: { in: moduleIds } },
+            });
+          }
+
+          await tx.validatedCase.delete({ where: { id } });
+
+          return {
+            caseStudy,
+            deletedModules: caseStudy.learningModules.map((module) => ({
+              id: module.id,
+              title: module.title,
+            })),
+          };
         },
-      });
+        { maxWait: 5000, timeout: 15000 }
+      );
 
-      if (!caseStudy) {
-        res.status(404).json({
-          success: false,
-          message: "Case study not found",
-        });
-        return;
-      }
+      if ("error" in result) {
+        if (result.error === "NOT_FOUND") {
+          res.status(404).json({
+            success: false,
+            message: "Studi kasus tidak ditemukan",
+          });
+          return;
+        }
 
-      if (
-        caseStudy.validationStatus !== "DRAFT" &&
-        caseStudy.validationStatus !== "REJECTED"
-      ) {
         res.status(409).json({
           success: false,
-          message: "Only draft or rejected case studies can be deleted",
-        });
-        return;
-      }
-
-      const newerVersion = await prisma.validatedCase.findFirst({
-        where: {
-          caseGroupId: caseStudy.caseGroupId,
-          version: {
-            gt: caseStudy.version,
-          },
-        },
-        select: {
-          id: true,
-        },
-      });
-
-      if (newerVersion) {
-        res.status(409).json({
-          success: false,
-          message: "Only the latest case study version can be deleted",
-        });
-        return;
-      }
-
-      const result = await prisma.validatedCase.deleteMany({
-        where: {
-          id,
-          validationStatus: {
-            in: ["DRAFT", "REJECTED"],
-          },
-        },
-      });
-
-      if (result.count === 0) {
-        res.status(409).json({
-          success: false,
-          message: "Case study can no longer be deleted",
+          message: `Studi kasus tidak dapat dihapus karena modulnya sudah digunakan oleh ${result.assignedStudents || "beberapa"} siswa. Riwayat belajar siswa harus tetap tersimpan.`,
         });
         return;
       }
@@ -443,9 +494,10 @@ router.delete(
         success: true,
         message: "Case study deleted successfully",
         data: {
-          id: caseStudy.id,
-          caseGroupId: caseStudy.caseGroupId,
-          version: caseStudy.version,
+          id: result.caseStudy.id,
+          caseGroupId: result.caseStudy.caseGroupId,
+          version: result.caseStudy.version,
+          deletedModules: result.deletedModules,
         },
       });
     } catch (error) {
@@ -454,6 +506,64 @@ router.delete(
       res.status(500).json({
         success: false,
         message: "Failed to delete case study",
+      });
+    }
+  }
+);
+
+// POST /api/cases/:id/provision-module
+// Create (or regenerate) the learning module, pre/post-tests and
+// AI-generated questions for a published case study.
+router.post(
+  "/:id/provision-module",
+  requireAuth,
+  requireRole("ADMIN"),
+  async (req, res) => {
+    const parsedId = caseIdSchema.safeParse(req.params.id);
+
+    if (!parsedId.success) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid case study ID",
+      });
+      return;
+    }
+
+    const regenerate = req.body?.regenerate === true;
+
+    try {
+      const result = await provisionModuleForCase(parsedId.data, { regenerate });
+
+      res.status(result.created ? 201 : 200).json({
+        success: true,
+        message: result.created
+          ? "Modul, pre-test, post-test, dan soal berhasil dibuat oleh AI"
+          : result.regenerated
+            ? "Soal modul berhasil dibuat ulang oleh AI"
+            : "Modul sudah tersedia",
+        data: result,
+      });
+    } catch (error) {
+      if (error instanceof ProvisioningError) {
+        const status =
+          error.code === "CASE_NOT_FOUND"
+            ? 404
+            : error.code === "AI_UNAVAILABLE"
+              ? 502
+              : 409;
+
+        res.status(status).json({
+          success: false,
+          message: error.message,
+        });
+        return;
+      }
+
+      console.error("Failed to provision learning module:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to provision learning module",
       });
     }
   }

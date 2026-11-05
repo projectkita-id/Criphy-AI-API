@@ -7,6 +7,7 @@ import { requireRole } from "../middlewares/role.middleware";
 import { Prisma } from "../generated/prisma/client";
 import { attemptIdSchema } from "../validators/assessment-answer.validator";
 import { AIEvaluationService } from "../services/ai-evaluation.service";
+import { getOrCreatePhaseEvaluation } from "../services/learning-evaluation.helper";
 
 const router = Router();
 
@@ -63,6 +64,12 @@ router.post(
             FROM "StudentModuleAssignment"
             WHERE "studentId" = ${studentId}::uuid
               AND "status" = 'ACTIVE'
+              AND "moduleId" = (
+                SELECT a."moduleId"
+                FROM "AssessmentAttempt" t
+                JOIN "Assessment" a ON a.id = t."assessmentId"
+                WHERE t.id = ${attemptId}::uuid
+              )
             FOR UPDATE
           `;
 
@@ -77,8 +84,7 @@ router.post(
           const assignment =
             await tx.studentModuleAssignment.findFirst({
               where: {
-                studentId,
-                status: "ACTIVE",
+                id: lockedAssignments[0].id,
               },
               select: {
                 id: true,
@@ -151,6 +157,7 @@ router.post(
                             stimulus: true,
                             scientificData: true,
                             targetConcept: true,
+                            possibleMisconceptions: true,
                             expertAnswer: true,
                           },
                         },
@@ -387,6 +394,8 @@ router.post(
             });
 
           const caseContext = {
+            id: attempt.assessment.module.case.id,
+            possibleMisconceptions: attempt.assessment.module.case.possibleMisconceptions,
             title: attempt.assessment.module.case.title,
             context: attempt.assessment.module.case.context,
             topic: attempt.assessment.module.case.topic,
@@ -398,27 +407,33 @@ router.post(
 
           let essayTotalScore = 0;
           let essayMaxScore = 0;
-          const essayGradingResults = [];
 
-          for (const question of essayQuestions) {
-            const studentAnswer = essayAnswers.find(
-              (ans) => ans.questionId === question.id
-            );
+          // Grade all essays in parallel to keep the transaction short.
+          const essayGradingResults = await Promise.all(
+            essayQuestions.map(async (question) => {
+              const studentAnswer = essayAnswers.find(
+                (ans) => ans.questionId === question.id
+              );
 
-            if (!studentAnswer) {
-              throw new Error("INCOMPLETE_ANSWERS");
-            }
+              if (!studentAnswer) {
+                throw new Error("INCOMPLETE_ANSWERS");
+              }
 
-            const graded =
-              await AIEvaluationService.gradeEssayAnswer({
-                questionText: question.questionText,
-                rubric: question.rubric,
-                maxScore: question.maxScore,
-                indicator: question.indicator,
-                studentAnswer: studentAnswer.answer,
-                caseStudy: caseContext,
-              });
+              const graded =
+                await AIEvaluationService.gradeEssayAnswer({
+                  questionText: question.questionText,
+                  rubric: question.rubric,
+                  maxScore: question.maxScore,
+                  indicator: question.indicator,
+                  studentAnswer: studentAnswer.answer,
+                  caseStudy: caseContext,
+                });
 
+              return { question, studentAnswer, graded };
+            })
+          );
+
+          for (const { question, studentAnswer, graded } of essayGradingResults) {
             await tx.assessmentAnswer.update({
               where: {
                 id: studentAnswer.id,
@@ -432,12 +447,6 @@ router.post(
 
             essayTotalScore += graded.score;
             essayMaxScore += question.maxScore;
-            essayGradingResults.push({
-              questionId: question.id,
-              score: graded.score,
-              maxScore: question.maxScore,
-              feedback: graded.feedback,
-            });
           }
 
           // ==========================================
@@ -471,31 +480,36 @@ router.post(
 
             if (preTestAttempt) {
               let preUpdated = false;
-              for (const preAns of preTestAttempt.answers) {
-                if (
+              const pendingPre = preTestAttempt.answers.filter(
+                (preAns) =>
                   preAns.question.type === "ESSAY" &&
                   preAns.score === null
-                ) {
-                  const gradedPre =
-                    await AIEvaluationService.gradeEssayAnswer({
+              );
+              const gradedPreList = await Promise.all(
+                pendingPre.map((preAns) =>
+                  AIEvaluationService.gradeEssayAnswer({
                       questionText: preAns.question.questionText,
                       rubric: preAns.question.rubric,
                       maxScore: preAns.question.maxScore,
                       indicator: preAns.question.indicator,
                       studentAnswer: preAns.answer,
                       caseStudy: caseContext,
-                    });
+                    })
+                )
+              );
 
-                  await tx.assessmentAnswer.update({
-                    where: { id: preAns.id },
-                    data: {
-                      score: gradedPre.score,
-                      feedback: gradedPre.feedback,
-                      gradedAt: new Date(),
-                    },
-                  });
-                  preUpdated = true;
-                }
+              for (let index = 0; index < pendingPre.length; index++) {
+                const gradedPre = gradedPreList[index];
+
+                await tx.assessmentAnswer.update({
+                  where: { id: pendingPre[index].id },
+                  data: {
+                    score: gradedPre.score,
+                    feedback: gradedPre.feedback,
+                    gradedAt: new Date(),
+                  },
+                });
+                preUpdated = true;
               }
 
               if (preUpdated || preTestAttempt.status !== "GRADED") {
@@ -533,75 +547,12 @@ router.post(
               });
 
             if (session) {
-              const p1 = session.phases.find(
-                (p) => p.phaseNumber === 1
-              );
-              const p2 = session.phases.find(
-                (p) => p.phaseNumber === 2
-              );
-              const p3 = session.phases.find(
-                (p) => p.phaseNumber === 3
-              );
-              const p4 = session.phases.find(
-                (p) => p.phaseNumber === 4
-              );
-              const p5 = session.phases.find(
-                (p) => p.phaseNumber === 5
-              );
-
-              const p1Content = p1?.submission
-                ?.content as Record<string, unknown> | null;
-              const p4Content = p4?.submission
-                ?.content as Record<string, unknown> | null;
-              const p5Content = p5?.submission
-                ?.content as Record<string, unknown> | null;
-
               phaseEvaluationResult =
-                await AIEvaluationService.evaluateLearningPhases({
-                  caseStudy: caseContext,
-                  phase1: p1Content
-                    ? {
-                        prediction:
-                          typeof p1Content.prediction === "string"
-                            ? p1Content.prediction
-                            : null,
-                        reasoning:
-                          typeof p1Content.reasoning === "string"
-                            ? p1Content.reasoning
-                            : null,
-                        confidence:
-                          typeof p1Content.confidence === "string"
-                            ? p1Content.confidence
-                            : null,
-                      }
-                    : p1?.responses[0]
-                      ? { prediction: p1.responses[0].answer }
-                      : null,
-                  phase2Responses: p2?.responses.map((r) => ({
-                    answer: r.answer,
-                    aiFeedback: r.aiFeedback,
-                  })),
-                  phase3Responses: p3?.responses.map((r) => ({
-                    answer: r.answer,
-                    aiFeedback: r.aiFeedback,
-                  })),
-                  phase4Submission: p4Content as any,
-                  phase5Submission: p5Content as any,
-                });
-
-              // Store phase evaluation into Phase 5 submission content
-              if (p5?.submission) {
-                await tx.learningPhaseSubmission.update({
-                  where: { id: p5.submission.id },
-                  data: {
-                    content: {
-                      ...(p5Content || {}),
-                      aiEvaluation:
-                        phaseEvaluationResult as unknown as Prisma.InputJsonValue,
-                    } as Prisma.InputJsonObject,
-                  },
-                });
-              }
+                await getOrCreatePhaseEvaluation(
+                  tx,
+                  session.phases,
+                  caseContext
+                );
             }
           }
 
@@ -697,7 +648,15 @@ router.post(
                 essayMaxScore > 0
                   ? Math.round((essayTotalScore / essayMaxScore) * 10000) / 100
                   : 0,
-              results: essayGradingResults,
+              results: essayGradingResults.map(
+                ({ question, graded }) => ({
+                  questionId: question.id,
+                  score: graded.score,
+                  maxScore: question.maxScore,
+                  feedback: graded.feedback,
+                  relevance: graded.relevance,
+                })
+              ),
             },
             phaseEvaluation: phaseEvaluationResult,
             moduleAssignment: updatedAssignment,
@@ -705,7 +664,7 @@ router.post(
         },
         {
           maxWait: 15000,
-          timeout: 45000,
+          timeout: 120000,
         }
       );
 
@@ -734,47 +693,47 @@ router.post(
       > = {
         ATTEMPT_NOT_FOUND: {
           status: 404,
-          message: "Assessment attempt not found",
+          message: "Data pengerjaan asesmen tidak ditemukan. Muat ulang halaman lalu coba lagi.",
         },
         NO_ACTIVE_ASSIGNMENT: {
           status: 403,
           message:
-            "You do not have an active module assignment",
+            "Modul untuk asesmen ini belum aktif. Pilih kembali konteks pembelajaranmu.",
         },
         WRONG_MODULE: {
           status: 403,
           message:
-            "This assessment does not belong to your assigned module",
+            "Asesmen ini bukan bagian dari modul yang sedang kamu kerjakan.",
         },
         INVALID_STAGE: {
           status: 409,
           message:
-            "This assessment is not available at your current learning stage",
+            "Asesmen ini belum bisa dikerjakan pada tahap belajarmu saat ini.",
         },
         ALREADY_SUBMITTED: {
           status: 409,
           message:
-            "Assessment has already been submitted",
+            "Asesmen ini sudah kamu kumpulkan sebelumnya.",
         },
         ASSESSMENT_UNAVAILABLE: {
           status: 409,
           message:
-            "Assessment is no longer available",
+            "Asesmen ini sudah tidak tersedia.",
         },
         LEARNING_NOT_COMPLETED: {
           status: 409,
           message:
-            "All five learning phases must be completed before submitting the post-test",
+            "Selesaikan kelima fase pembelajaran terlebih dahulu sebelum post-test.",
         },
         INCOMPLETE_ANSWERS: {
           status: 409,
           message:
-            "All questions must be answered before submission",
+            "Semua soal wajib dijawab sebelum dikumpulkan.",
         },
         INVALID_ANSWER_KEY: {
           status: 409,
           message:
-            "One or more MCQ questions have an invalid answer key",
+            "Ada soal pilihan ganda dengan kunci jawaban tidak valid. Hubungi guru/admin.",
         },
       };
 
@@ -797,7 +756,7 @@ router.post(
 
       res.status(500).json({
         success: false,
-        message: "Failed to submit assessment",
+        message: "Gagal mengumpulkan asesmen. Coba lagi beberapa saat lagi.",
       });
     }
   }

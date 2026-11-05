@@ -66,14 +66,12 @@ router.post(
             throw new Error("MODULE_NOT_FOUND");
           }
 
-          // Prevent changes once assessments are published
-          // or any student attempts exist.
+          // Prevent changes once any student attempt exists.
           const lockedAssessment =
             await tx.assessment.findFirst({
               where: {
                 moduleId,
                 OR: [
-                  { status: { not: "DRAFT" } },
                   { attempts: { some: {} } },
                 ],
               },
@@ -344,7 +342,6 @@ router.post(
                where: {
                  moduleId,
                  OR: [
-                   { status: { not: "DRAFT" } },
                    { attempts: { some: {} } },
                  ],
                },
@@ -535,7 +532,6 @@ router.post(
                where: {
                  moduleId,
                  OR: [
-                   { status: { not: "DRAFT" } },
                    { attempts: { some: {} } },
                  ],
                },

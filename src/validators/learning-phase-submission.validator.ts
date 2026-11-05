@@ -15,15 +15,44 @@ export const learningPhaseSubmissionParamsSchema = z.object({
   phase: z.coerce.number().int().min(1).max(5),
 });
 
+const optionalText = z
+  .string()
+  .trim()
+  .max(10000, "Maximum 10000 characters.")
+  .optional();
+
+const questionText = z.string().trim().min(1).max(1000);
+
+// A prompt shown to the student together with the answer,
+// so history and grading keep the exact question that was asked.
+const answeredPromptSchema = z
+  .object({
+    question: questionText,
+    answer: requiredText,
+  })
+  .strict();
+
+const answeredPromptsSchema = z.array(answeredPromptSchema).min(1).max(10);
+
 // ==========================================
 // PHASE 1 — INITIAL CONCEPTIONS
 // ==========================================
 
 export const phaseOneSubmissionSchema = z
   .object({
-    prediction: requiredText,
-    reasoning: requiredText,
+    answers: answeredPromptsSchema,
     confidence: z.enum(["LOW", "MEDIUM", "HIGH"]),
+    responseTimeSeconds: z.number().int().min(0).max(86400).optional(),
+  })
+  .strict();
+
+// ==========================================
+// PHASES 2 & 3 — COGNITIVE CONFLICT / EVIDENCE
+// ==========================================
+
+export const promptAnswersSubmissionSchema = z
+  .object({
+    answers: answeredPromptsSchema,
   })
   .strict();
 
@@ -36,8 +65,16 @@ export const phaseFourSubmissionSchema = z
     claim: requiredText,
     evidence: requiredText,
     reasoning: requiredText,
-    alternativeArgument: requiredText,
-    revision: requiredText,
+    alternativeArgument: optionalText,
+    revision: optionalText,
+    questions: z
+      .object({
+        claim: questionText.optional(),
+        evidence: questionText.optional(),
+        reasoning: questionText.optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -49,6 +86,13 @@ export const phaseFiveSubmissionSchema = z
   .object({
     understandingChange: requiredText,
     influentialEvidence: requiredText,
+    questions: z
+      .object({
+        understandingChange: questionText.optional(),
+        influentialEvidence: questionText.optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -64,6 +108,10 @@ export const validateLearningPhaseSubmission = (
     case 1:
       return phaseOneSubmissionSchema.safeParse(content);
 
+    case 2:
+    case 3:
+      return promptAnswersSubmissionSchema.safeParse(content);
+
     case 4:
       return phaseFourSubmissionSchema.safeParse(content);
 
@@ -74,8 +122,7 @@ export const validateLearningPhaseSubmission = (
       return {
         success: false as const,
         error: {
-          message:
-            "Structured submissions are currently supported only for phases 1, 4 and 5.",
+          message: "Invalid learning phase.",
         },
       };
   }

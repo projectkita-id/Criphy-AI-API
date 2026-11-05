@@ -48,7 +48,7 @@ router.put(
     if (!parsedBody.success) {
       res.status(400).json({
         success: false,
-        message: "Invalid answers",
+        message: "Format jawaban tidak valid.",
         errors: parsedBody.error.flatten(),
       });
       return;
@@ -87,6 +87,12 @@ router.put(
             FROM "StudentModuleAssignment"
             WHERE "studentId" = ${studentId}::uuid
               AND "status" = 'ACTIVE'
+              AND "moduleId" = (
+                SELECT a."moduleId"
+                FROM "AssessmentAttempt" t
+                JOIN "Assessment" a ON a.id = t."assessmentId"
+                WHERE t.id = ${attemptId}::uuid
+              )
             FOR UPDATE
           `;
 
@@ -101,8 +107,7 @@ router.put(
           const assignment =
             await tx.studentModuleAssignment.findFirst({
               where: {
-                studentId,
-                status: "ACTIVE",
+                id: lockedAssignments[0].id,
               },
               select: {
                 id: true,
@@ -383,51 +388,51 @@ router.put(
       > = {
         ATTEMPT_NOT_FOUND: {
           status: 404,
-          message: "Assessment attempt not found",
+          message: "Data pengerjaan asesmen tidak ditemukan. Muat ulang halaman lalu coba lagi.",
         },
         NO_ACTIVE_ASSIGNMENT: {
           status: 403,
           message:
-            "You do not have an active module assignment",
+            "Modul untuk asesmen ini belum aktif. Pilih kembali konteks pembelajaranmu.",
         },
         WRONG_MODULE: {
           status: 403,
           message:
-            "This assessment does not belong to your assigned module",
+            "Asesmen ini bukan bagian dari modul yang sedang kamu kerjakan.",
         },
         INVALID_STAGE: {
           status: 409,
           message:
-            "This assessment is not available at your current learning stage",
+            "Asesmen ini belum bisa dikerjakan pada tahap belajarmu saat ini.",
         },
         LEARNING_NOT_COMPLETED: {
           status: 409,
           message:
-            "All five learning phases must be completed before answering the post-test",
+            "Selesaikan kelima fase pembelajaran terlebih dahulu sebelum post-test.",
         },
         ATTEMPT_NOT_EDITABLE: {
           status: 409,
           message:
-            "This assessment attempt is no longer editable",
+            "Jawaban asesmen ini sudah tidak bisa diubah.",
         },
         ASSESSMENT_UNAVAILABLE: {
           status: 409,
-          message: "Assessment is no longer available",
+          message: "Asesmen ini sudah tidak tersedia.",
         },
         QUESTION_NOT_FOUND: {
           status: 404,
           message:
-            "One or more questions do not belong to this assessment",
+            "Ada soal yang bukan bagian dari asesmen ini. Muat ulang halaman.",
         },
         INVALID_QUESTION_OPTIONS: {
           status: 409,
           message:
-            "One or more questions have invalid options",
+            "Ada soal dengan pilihan jawaban tidak valid. Hubungi guru/admin.",
         },
         INVALID_MCQ_ANSWER: {
           status: 400,
           message:
-            "One or more MCQ answers are invalid",
+            "Ada jawaban pilihan ganda yang tidak valid.",
         },
       };
 
@@ -450,7 +455,7 @@ router.put(
 
       res.status(500).json({
         success: false,
-        message: "Failed to save answers",
+        message: "Gagal menyimpan jawaban. Coba lagi beberapa saat lagi.",
       });
     }
   }
@@ -543,7 +548,7 @@ router.get(
       if (!attempt) {
         res.status(404).json({
           success: false,
-          message: "Assessment attempt not found",
+          message: "Data pengerjaan asesmen tidak ditemukan. Muat ulang halaman lalu coba lagi.",
         });
         return;
       }
@@ -558,7 +563,7 @@ router.get(
       ) {
         res.status(409).json({
           success: false,
-          message: "Assessment is no longer available",
+          message: "Asesmen ini sudah tidak tersedia.",
         });
         return;
       }

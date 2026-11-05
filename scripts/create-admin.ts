@@ -19,7 +19,7 @@ const adminSchema = z.object({
   ADMIN_EMAIL: z.email().transform((email) =>
     email.toLowerCase()
   ),
-  ADMIN_PASSWORD: z.string().min(12),
+  ADMIN_PASSWORD: z.string().min(8),
 });
 
 async function main() {
